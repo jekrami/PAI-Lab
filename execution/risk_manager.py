@@ -1,0 +1,87 @@
+import numpy as np
+
+
+class RiskManager:
+
+    def __init__(
+        self,
+        max_total_drawdown=-15,      # hard capital stop (ATR units)
+        max_daily_loss=-5,           # per session loss limit
+        max_loss_streak=5,           # max consecutive losses
+        volatility_spike_factor=2.5  # abnormal volatility cutoff
+    ):
+
+        self.max_total_drawdown = max_total_drawdown
+        self.max_daily_loss = max_daily_loss
+        self.max_loss_streak = max_loss_streak
+        self.volatility_spike_factor = volatility_spike_factor
+
+        self.daily_returns = []
+        self.total_equity = []
+        self.current_loss_streak = 0
+        self.hard_stop_triggered = False
+
+    # -------------------------------------------------
+    # Update after trade
+    # -------------------------------------------------
+
+    def update(self, trade_return, equity_series):
+
+        self.daily_returns.append(trade_return)
+        self.total_equity = equity_series
+
+        # Track loss streak
+        if trade_return < 0:
+            self.current_loss_streak += 1
+        else:
+            self.current_loss_streak = 0
+
+        self._evaluate()
+
+    # -------------------------------------------------
+    # Evaluate capital risk
+    # -------------------------------------------------
+
+    def _evaluate(self):
+
+        if not self.total_equity:
+            return
+
+        total_drawdown = min(self.total_equity)
+
+        # Hard stop conditions
+        if total_drawdown <= self.max_total_drawdown:
+            self.hard_stop_triggered = True
+
+        if sum(self.daily_returns) <= self.max_daily_loss:
+            self.hard_stop_triggered = True
+
+        if self.current_loss_streak >= self.max_loss_streak:
+            self.hard_stop_triggered = True
+
+    # -------------------------------------------------
+    # Volatility protection
+    # -------------------------------------------------
+
+    def volatility_check(self, recent_returns):
+
+        if len(recent_returns) < 10:
+            return True
+
+        recent_vol = np.std(recent_returns[-10:])
+        long_vol = np.std(recent_returns)
+
+        if long_vol == 0:
+            return True
+
+        if recent_vol > self.volatility_spike_factor * long_vol:
+            return False
+
+        return True
+
+    # -------------------------------------------------
+    # Allow trading?
+    # -------------------------------------------------
+
+    def allow_trading(self):
+        return not self.hard_stop_triggered

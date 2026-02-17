@@ -1,0 +1,1 @@
+timestamp,mode,trade_index,direction,decision,entry_time,entry_price,exit_time,exit_price,size,atr,outcome,equity_before,equity_after,probability,adaptive_threshold,regime_paused
