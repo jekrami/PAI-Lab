@@ -4,9 +4,10 @@ import pickle
 
 class StateManager:
 
-    def __init__(self, path="state/engine_state.pkl"):
-        self.path = path
-        os.makedirs("state", exist_ok=True)
+    def __init__(self, asset_id="BTCUSDT", base_path="state"):
+        self.asset_id = asset_id
+        self.path = f"{base_path}/engine_state_{asset_id}.pkl"
+        os.makedirs(base_path, exist_ok=True)
 
     # -------------------------------------------------
     # Save full engine state

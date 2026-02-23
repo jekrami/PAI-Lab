@@ -195,68 +195,104 @@ class SecondEntryDetector:
 
     @staticmethod
     def detect(memory, bias, pa_info, lookback=30):
-
-        # Support both bullish H2 and bearish L2 symmetry
         if bias not in ("bullish", "bearish"):
             return None
-
         if len(memory) < 10:
             return None
 
         mem = memory[-lookback:]
+        signal_bar = mem[-1]
 
         # -------------------------------------------------
-        # 1️⃣ Find impulse extreme
+        # 1️⃣ Explicit 2-Legged Pullback Detection (H2/L2)
         # -------------------------------------------------
-
-        pullback = []
-
-        if bias == "bullish":
-            impulse_extreme = mem[-1]["high"]
-        else:
-            impulse_extreme = mem[-1]["low"]
+        # For bullish (H2): PB Leg 2 Down -> Bounce Up (H1) -> PB Leg 1 Down -> Impulse High
+        # For bearish (L2): PB Leg 2 Up -> Bounce Down (L1) -> PB Leg 1 Up -> Impulse Low
 
         i = len(mem) - 2
+        state = "pb_leg2"
+        pullback = [signal_bar]
 
-        while i >= 0:
-
-            bar = mem[i]
-
-            # For bullish bias: bearish or neutral bars are pullback.
-            # For bearish bias: bullish or neutral bars are pullback.
-            if bias == "bullish":
-                is_pullback = bar["close"] <= bar["open"]
-            else:
-                is_pullback = bar["close"] >= bar["open"]
-
-            if is_pullback:
-                pullback.insert(0, bar)
+        if bias == "bullish":
+            # Walk backward to find H1 (Bounce Up)
+            while i > 0 and state == "pb_leg2":
+                bar = mem[i]
+                pullback.append(bar)
+                # If current bar is bullish and higher than the prior, we found the bounce
+                if bar["close"] > bar["open"] and bar["high"] > mem[i-1]["high"]:
+                    state = "bounce_h1"
                 i -= 1
-            else:
-                break
 
-        if len(pullback) == 0:
-            return None
+            if state != "bounce_h1": return None
+
+            # Walk backward through the bounce to find PB Leg 1
+            while i > 0 and state == "bounce_h1":
+                bar = mem[i]
+                pullback.append(bar)
+                # If current bar is bearish, we are back in Leg 1 Down
+                if bar["close"] < bar["open"] and bar["high"] < mem[i-1]["high"]:
+                    state = "pb_leg1"
+                i -= 1
+
+            if state != "pb_leg1": return None
+
+            # Walk backward through PB Leg 1 to find the Impulse High
+            while i >= 0 and state == "pb_leg1":
+                bar = mem[i]
+                pullback.append(bar)
+                # If the bar is strong bullish, it's the end of the prior impulse
+                if bar["close"] > bar["open"] and bar["high"] > (mem[i-1]["high"] if i>0 else bar["high"] - 1):
+                    state = "impulse"
+                    break
+                i -= 1
+
+            if state != "impulse": return None
+
+            pullback_extreme = min(b["low"] for b in pullback)
+            impulse_extreme = max(b["high"] for b in pullback)
+            depth = impulse_extreme - pullback_extreme
+
+        else: # bearish L2
+            # Walk backward to find L1 (Bounce Down)
+            while i > 0 and state == "pb_leg2":
+                bar = mem[i]
+                pullback.append(bar)
+                if bar["close"] < bar["open"] and bar["low"] < mem[i-1]["low"]:
+                    state = "bounce_l1"
+                i -= 1
+
+            if state != "bounce_l1": return None
+
+            # Walk backward through the bounce to find PB Leg 1 Up
+            while i > 0 and state == "bounce_l1":
+                bar = mem[i]
+                pullback.append(bar)
+                if bar["close"] > bar["open"] and bar["low"] > mem[i-1]["low"]:
+                    state = "pb_leg1"
+                i -= 1
+
+            if state != "pb_leg1": return None
+
+            # Walk backward to find Impulse Low
+            while i >= 0 and state == "pb_leg1":
+                bar = mem[i]
+                pullback.append(bar)
+                if bar["close"] < bar["open"] and bar["low"] < (mem[i-1]["low"] if i>0 else bar["low"] + 1):
+                    state = "impulse"
+                    break
+                i -= 1
+
+            if state != "impulse": return None
+
+            pullback_extreme = max(b["high"] for b in pullback)
+            impulse_extreme = min(b["low"] for b in pullback)
+            depth = pullback_extreme - impulse_extreme
 
         pullback_bars = len(pullback)
 
         # -------------------------------------------------
-        # 3️⃣ Measure pullback depth
+        # 2️⃣ Signal Bar Quality (Reversal confirmation)
         # -------------------------------------------------
-
-        if bias == "bullish":
-            pullback_extreme = min(b["low"] for b in pullback)
-            depth = impulse_extreme - pullback_extreme
-        else:
-            pullback_extreme = max(b["high"] for b in pullback)
-            depth = pullback_extreme - impulse_extreme
-
-        # -------------------------------------------------
-        # 4️⃣ Reversal confirmation (signal bar)
-        # -------------------------------------------------
-
-        signal_bar = mem[-1]
-
         body = abs(signal_bar["close"] - signal_bar["open"])
         rng = signal_bar["high"] - signal_bar["low"]
 
@@ -268,11 +304,11 @@ class SecondEntryDetector:
 
         # Require strong reversal in the direction of bias
         if bias == "bullish":
-            if not (close_pos > 0.7 and body_ratio > 0.5):
+            if not (close_pos > 0.65 and body_ratio > 0.4): # Slightly relaxed for Gold/Crypto nuances
                 return None
             direction = "bullish"
         else:
-            if not (close_pos < 0.3 and body_ratio > 0.5):
+            if not (close_pos < 0.35 and body_ratio > 0.4):
                 return None
             direction = "bearish"
 
@@ -283,6 +319,7 @@ class SecondEntryDetector:
             "price": signal_bar["close"],
             "pullback_depth": depth,
             "pullback_bars": pullback_bars,
+            "leg1_h1": True # Flag to indicate explicit leg check passed
         }
 
 
@@ -294,6 +331,26 @@ class MarketEnvironmentClassifier:
             return "unknown"
 
         recent = memory[-lookback:]
+
+        # --- Tight Trading Range (TTR) Detection ---
+        ttr_lookback = 7
+        if len(recent) >= ttr_lookback:
+            ttr_bars = recent[-ttr_lookback:]
+            overlaps = 0
+            for i in range(1, len(ttr_bars)):
+                curr_h, curr_l = ttr_bars[i]["high"], ttr_bars[i]["low"]
+                prev_h, prev_l = ttr_bars[i-1]["high"], ttr_bars[i-1]["low"]
+                # Check if bars overlap
+                if min(curr_h, prev_h) > max(curr_l, prev_l):
+                    overlaps += 1
+
+            ranges = [max(c["high"] - c["low"], 1e-9) for c in ttr_bars]
+            avg_range = sum(ranges) / len(ranges)
+            bodies = [abs(c["close"] - c["open"]) for c in ttr_bars]
+            avg_body = sum(bodies) / len(bodies)
+
+            if overlaps >= ttr_lookback - 2 and avg_body < avg_range * 0.5:
+                return "tight_trading_range"
 
         # Count strong bars
         strong_bull = 0

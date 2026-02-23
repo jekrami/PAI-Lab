@@ -27,7 +27,15 @@ class BacktestResolver:
     def __init__(self, df):
         self.df = df
 
-    def resolve(self, entry_price, atr, idx, direction="bullish"):
+    def resolve(self, entry_price, atr, idx, direction="bullish", features=None, asset_config=None):
+        # Determine Target and Stop dynamically
+        target_dist = ATR_TARGET * atr
+        stop_dist = ATR_STOP * atr
+        
+        if asset_config and asset_config.get("target_mode") == "measured_move" and features:
+            impulse_raw = features.get("impulse_size_raw", 0)
+            if impulse_raw > 0:
+                target_dist = impulse_raw
 
         for j in range(1, 11):
 
@@ -37,14 +45,14 @@ class BacktestResolver:
             future = self.df.iloc[idx + j]
 
             if direction == "bullish":
-                if future["high"] - entry_price >= ATR_TARGET * atr:
+                if future["high"] - entry_price >= target_dist:
                     return 1
-                if future["low"] - entry_price <= -ATR_STOP * atr:
+                if entry_price - future["low"] >= stop_dist:
                     return 0
             else:  # bearish
-                if entry_price - future["low"] >= ATR_TARGET * atr:
+                if entry_price - future["low"] >= target_dist:
                     return 1
-                if future["high"] - entry_price >= ATR_STOP * atr:
+                if future["high"] - entry_price >= stop_dist:
                     return 0
 
         return None
@@ -62,14 +70,22 @@ class LiveResolver:
     def has_open_position(self):
         return self.position is not None
 
-    def open_position(self, entry_price, atr, features, direction, size, entry_time):
+    def open_position(self, entry_price, atr, features, direction, size, entry_time, asset_config=None):
+
+        target_dist = ATR_TARGET * atr
+        stop_dist = ATR_STOP * atr
+
+        if asset_config and asset_config.get("target_mode") == "measured_move" and features:
+            impulse_raw = features.get("impulse_size_raw", 0)
+            if impulse_raw > 0:
+                target_dist = impulse_raw
 
         if direction == "bearish":
-            stop = entry_price + ATR_STOP * atr
-            target = entry_price - ATR_TARGET * atr
+            stop = entry_price + stop_dist
+            target = entry_price - target_dist
         else:
-            stop = entry_price - ATR_STOP * atr
-            target = entry_price + ATR_TARGET * atr
+            stop = entry_price - stop_dist
+            target = entry_price + target_dist
 
         self.position = {
             "entry": entry_price,
@@ -81,7 +97,7 @@ class LiveResolver:
             "entry_time": entry_time,
         }
 
-        print(f"[LIVE] {direction.upper()} position opened @ {entry_price}")
+        print(f"[LIVE] {direction.upper()} position opened @ {entry_price} | Target: {target:.2f} | Stop: {stop:.2f}")
 
     def update(self, candle):
 
@@ -92,17 +108,18 @@ class LiveResolver:
         pos = self.position
 
         # Check target
-        if candle["high"] >= self.position["target"]:
+        if (pos["direction"] == "bullish" and candle["high"] >= pos["target"]) or \
+           (pos["direction"] == "bearish" and candle["low"] <= pos["target"]):
             print("[LIVE] Target hit")
-            features = pos.get("features")
             self.position = None
             return 1, pos
 
         # Check stop
-        if candle["low"] <= self.position["stop"]:
+        if (pos["direction"] == "bullish" and candle["low"] <= pos["stop"]) or \
+           (pos["direction"] == "bearish" and candle["high"] >= pos["stop"]):
             print("[LIVE] Stop hit")
-            features = pos.get("features")
             self.position = None
             return 0, pos
 
         return None, None
+

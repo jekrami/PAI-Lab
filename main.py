@@ -46,7 +46,9 @@ from engine.core_engine import CoreEngine
 
 class PAILabEngine:
 
-    def __init__(self, data_path):
+    def __init__(self, data_path, asset_id=DEFAULT_ASSET):
+        self.asset_id = asset_id
+        self.asset_config = ASSETS.get(asset_id, ASSETS[DEFAULT_ASSET])
         self.df = pd.read_csv(data_path, parse_dates=["open_time"])
         #self.memory = MarketMemory(maxlen=100)
         self.core = CoreEngine()
@@ -55,7 +57,7 @@ class PAILabEngine:
         self.monitor = PerformanceMonitor()
         self.regime_guard = RegimeGuard(window=20)
         self.logger = TelemetryLogger()
-        self.state_manager = StateManager()
+        self.state_manager = StateManager(asset_id=self.asset_id)
         self.last_index = 0
         self.state_manager.load(self)
         self.risk_manager = RiskManager()
@@ -96,10 +98,11 @@ class PAILabEngine:
             self.core.add_candle(candle)
 
             signal = self.core.detect_signal()
-            if not signal:
+            if signal == "tight_trading_range" or not signal:
+                # Core engine blocks signals if market env classifier outputs TTR
                 continue
 
-            feature_pack = self.core.build_features(signal)
+            feature_pack = self.core.build_features(signal, asset_config=self.asset_config)
             if not feature_pack:
                 continue
 
@@ -119,11 +122,16 @@ class PAILabEngine:
 
             entry_price = row["high"]
 
-            # Position sizing is currently advisory – outcome logic remains ATR-based.
+            # Position sizing is currently advisory – outcome logic remains dynamic based on asset.
             position_size = self.position_sizer.size(atr, self.monitor.equity)
 
             # Backtest resolver still returns directional outcome only.
-            outcome = self.resolver.resolve(entry_price, atr, idx, direction=signal.get("direction", "bullish"))
+            outcome = self.resolver.resolve(
+                entry_price, atr, idx, 
+                direction=signal.get("direction", "bullish"),
+                features=features,
+                asset_config=self.asset_config
+            )
 
             if outcome is None:
                 continue
@@ -229,5 +237,5 @@ class PAILabEngine:
 
 if __name__ == "__main__":
 
-    engine = PAILabEngine("btc_5m_extended.csv")
+    engine = PAILabEngine("btc_5m_extended.csv", asset_id="BTCUSDT")
     engine.run()

@@ -54,6 +54,9 @@ class CoreEngine:
         pa = PriceActionAnalyzer.trend_bar_info(mem)
         env = MarketEnvironmentClassifier.classify(mem, trend, pa)
 
+        if env == "tight_trading_range":
+            return "tight_trading_range"
+
         signal = SecondEntryDetector.detect(mem, trend["direction"], pa)
 
         if not signal:
@@ -73,7 +76,7 @@ class CoreEngine:
     # Build features for probability model
     # -------------------------------------------------
 
-    def build_features(self, signal):
+    def build_features(self, signal, asset_config=None):
 
         mem = self.memory.data()
 
@@ -92,6 +95,6 @@ class CoreEngine:
 
         signal_bar = mem[-1]
 
-        features = extract_features(mem, signal, atr, long_atr, signal_bar, signal_bar)
+        features = extract_features(mem, signal, atr, long_atr, signal_bar, signal_bar, asset_config=asset_config)
 
         return features, atr
