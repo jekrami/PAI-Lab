@@ -58,5 +58,6 @@ def extract_features(mem, signal, atr, long_atr, next_bar, signal_bar, asset_con
         "dist_to_hod_atr": dist_to_hod_atr,
         "dist_to_lod_atr": dist_to_lod_atr,
         "gap_atr": gap_atr,
-        "impulse_size_raw": impulse_size_raw
+        "impulse_size_raw": impulse_size_raw,
     }
+

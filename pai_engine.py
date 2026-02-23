@@ -184,11 +184,46 @@ class PriceActionAnalyzer:
 
         climactic = sequence >= 3 and range_ > 1.3 * avg_range
 
+        # --- Tail Analysis (Brooks uses tails as weakness indicators) ---
+        if range_ > 0:
+            if last["close"] > last["open"]:  # bull bar
+                upper_tail = (last["high"] - last["close"]) / range_
+                lower_tail = (last["open"] - last["low"]) / range_
+            else:  # bear or doji
+                upper_tail = (last["high"] - last["open"]) / range_
+                lower_tail = (last["close"] - last["low"]) / range_
+        else:
+            upper_tail = 0
+            lower_tail = 0
+
+        # --- Bar Overlap (overlap with prior bar weakens signal) ---
+        overlap_pct = 0
+        if len(recent) >= 2:
+            prev = recent[-2]
+            overlap_high = min(last["high"], prev["high"])
+            overlap_low = max(last["low"], prev["low"])
+            if overlap_high > overlap_low and range_ > 0:
+                overlap_pct = (overlap_high - overlap_low) / range_
+        # --- Inside / Outside Bar Detection ---
+        is_inside_bar = False
+        is_outside_bar = False
+        if len(recent) >= 2:
+            prev = recent[-2]
+            if last["high"] <= prev["high"] and last["low"] >= prev["low"]:
+                is_inside_bar = True
+            if last["high"] > prev["high"] and last["low"] < prev["low"]:
+                is_outside_bar = True
+
         return {
             "bar_type": bar_type,
             "strong": strong,
             "sequence": sequence,
             "climactic": climactic,
+            "upper_tail": round(upper_tail, 3),
+            "lower_tail": round(lower_tail, 3),
+            "overlap_pct": round(overlap_pct, 3),
+            "is_inside_bar": is_inside_bar,
+            "is_outside_bar": is_outside_bar,
         }
 
 class SecondEntryDetector:
@@ -319,8 +354,146 @@ class SecondEntryDetector:
             "price": signal_bar["close"],
             "pullback_depth": depth,
             "pullback_bars": pullback_bars,
-            "leg1_h1": True # Flag to indicate explicit leg check passed
+            "leg1_h1": True  # Flag to indicate explicit leg check passed
         }
+
+
+class FirstEntryDetector:
+    """H1/L1 — single-leg pullback. Only valid in very strong trends (sequence ≥ 3)."""
+
+    @staticmethod
+    def detect(memory, bias, pa_info, lookback=20):
+        if bias not in ("bullish", "bearish"):
+            return None
+        if len(memory) < 10:
+            return None
+        # Only trigger in very strong trends
+        if pa_info.get("sequence", 0) < 3:
+            return None
+
+        mem = memory[-lookback:]
+        signal_bar = mem[-1]
+
+        # Signal bar quality (same as H2 check)
+        rng = signal_bar["high"] - signal_bar["low"]
+        if rng == 0:
+            return None
+        body = abs(signal_bar["close"] - signal_bar["open"])
+        close_pos = (signal_bar["close"] - signal_bar["low"]) / rng
+        body_ratio = body / rng
+
+        if bias == "bullish":
+            if not (close_pos > 0.65 and body_ratio > 0.4):
+                return None
+            # Simple single-leg: find a pullback (≥1 lower low) then bounce
+            pb_bars = 0
+            for j in range(len(mem) - 2, max(len(mem) - 8, 0), -1):
+                if mem[j]["close"] < mem[j]["open"]:
+                    pb_bars += 1
+                else:
+                    break
+            if pb_bars < 1:
+                return None
+            depth = max(b["high"] for b in mem[-pb_bars-2:]) - min(b["low"] for b in mem[-pb_bars-1:])
+            return {
+                "type": "first_entry",
+                "direction": "bullish",
+                "time": signal_bar["time"],
+                "price": signal_bar["close"],
+                "pullback_depth": depth,
+                "pullback_bars": pb_bars + 1,
+            }
+        else:
+            if not (close_pos < 0.35 and body_ratio > 0.4):
+                return None
+            pb_bars = 0
+            for j in range(len(mem) - 2, max(len(mem) - 8, 0), -1):
+                if mem[j]["close"] > mem[j]["open"]:
+                    pb_bars += 1
+                else:
+                    break
+            if pb_bars < 1:
+                return None
+            depth = max(b["high"] for b in mem[-pb_bars-1:]) - min(b["low"] for b in mem[-pb_bars-2:])
+            return {
+                "type": "first_entry",
+                "direction": "bearish",
+                "time": signal_bar["time"],
+                "price": signal_bar["close"],
+                "pullback_depth": depth,
+                "pullback_bars": pb_bars + 1,
+            }
+
+
+class WedgeDetector:
+    """3-Push reversal — Brooks' strongest reversal pattern."""
+
+    @staticmethod
+    def detect(memory, trend_direction, lookback=30):
+        if len(memory) < 15:
+            return None
+
+        mem = memory[-lookback:]
+
+        if trend_direction == "bullish":
+            # Bearish wedge: 3 pushes to higher highs with decreasing momentum
+            pushes = []
+            for k in range(5, len(mem)):
+                if mem[k]["high"] > max(c["high"] for c in mem[max(0, k-3):k]):
+                    push_body = abs(mem[k]["close"] - mem[k]["open"])
+                    pushes.append({"idx": k, "high": mem[k]["high"], "body": push_body})
+
+            if len(pushes) >= 3:
+                last_3 = pushes[-3:]
+                # Each push should make a higher high
+                if last_3[0]["high"] < last_3[1]["high"] < last_3[2]["high"]:
+                    # Momentum should decrease (smaller bodies)
+                    if last_3[2]["body"] < last_3[0]["body"]:
+                        signal_bar = mem[-1]
+                        rng = signal_bar["high"] - signal_bar["low"]
+                        if rng > 0:
+                            close_pos = (signal_bar["close"] - signal_bar["low"]) / rng
+                            if close_pos < 0.4:  # reversal bar closes low
+                                depth = last_3[2]["high"] - min(c["low"] for c in mem[-5:])
+                                return {
+                                    "type": "wedge_reversal",
+                                    "direction": "bearish",
+                                    "time": signal_bar["time"],
+                                    "price": signal_bar["close"],
+                                    "pullback_depth": depth,
+                                    "pullback_bars": 3,
+                                    "pushes": 3,
+                                }
+
+        elif trend_direction == "bearish":
+            # Bullish wedge: 3 pushes to lower lows with decreasing momentum
+            pushes = []
+            for k in range(5, len(mem)):
+                if mem[k]["low"] < min(c["low"] for c in mem[max(0, k-3):k]):
+                    push_body = abs(mem[k]["close"] - mem[k]["open"])
+                    pushes.append({"idx": k, "low": mem[k]["low"], "body": push_body})
+
+            if len(pushes) >= 3:
+                last_3 = pushes[-3:]
+                if last_3[0]["low"] > last_3[1]["low"] > last_3[2]["low"]:
+                    if last_3[2]["body"] < last_3[0]["body"]:
+                        signal_bar = mem[-1]
+                        rng = signal_bar["high"] - signal_bar["low"]
+                        if rng > 0:
+                            close_pos = (signal_bar["close"] - signal_bar["low"]) / rng
+                            if close_pos > 0.6:  # reversal bar closes high
+                                depth = max(c["high"] for c in mem[-5:]) - last_3[2]["low"]
+                                return {
+                                    "type": "wedge_reversal",
+                                    "direction": "bullish",
+                                    "time": signal_bar["time"],
+                                    "price": signal_bar["close"],
+                                    "pullback_depth": depth,
+                                    "pullback_bars": 3,
+                                    "pushes": 3,
+                                }
+
+        return None
 
 
 class MarketEnvironmentClassifier:

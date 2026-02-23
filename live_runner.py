@@ -1,4 +1,4 @@
-# 2026-02-23 | v0.2.0 | Live paper trading runner | Writer: J.Ekrami | Co-writer: Gemini
+# 2026-02-23 | v2.1.0 | Live paper trading runner | Writer: J.Ekrami | Co-writer: Antigravity
 """
 live_runner.py
 
@@ -7,13 +7,15 @@ Fully independent live paper trading mode.
 - Pulls historical candles from Binance to warm up engine
 - Then processes only CLOSED 5m candles
 - Uses single-position constraint
+- Enforces session window based on asset config
 - No CSV dependency
 - No replay contamination
 """
 
 import time
+import re
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from engine.core_engine import CoreEngine
 from execution.resolvers import LiveResolver
 from intelligence.rolling_controller import RollingController
@@ -21,8 +23,32 @@ from execution.regime_guard import RegimeGuard
 from execution.risk_manager import RiskManager
 from execution.position_sizer import PositionSizer
 from execution.telemetry_logger import TelemetryLogger
-from config import ATR_TARGET, ATR_STOP
+from config import ATR_TARGET, ATR_STOP, ASSETS, DEFAULT_ASSET
 from data.live_feed import BinanceLiveFeed
+
+# --- Asset Configuration ---
+ASSET_ID = DEFAULT_ASSET  # Change to "XAUUSD" for Gold
+ASSET_CONFIG = ASSETS.get(ASSET_ID, ASSETS[DEFAULT_ASSET])
+
+# EST offset (UTC-5 fixed proxy)
+EST_OFFSET = timedelta(hours=-5)
+
+
+def _is_within_session(dt_utc, session_str):
+    """Check if UTC time falls within the asset's session window."""
+    if session_str == "24/7":
+        return True
+    # Parse "HH:MM-HH:MM_TZ" format
+    match = re.match(r"(\d{2}):(\d{2})-(\d{2}):(\d{2})_EST", session_str)
+    if not match:
+        return True  # Unknown format → allow
+    start_h, start_m = int(match.group(1)), int(match.group(2))
+    end_h, end_m = int(match.group(3)), int(match.group(4))
+    dt_est = dt_utc + EST_OFFSET
+    current_minutes = dt_est.hour * 60 + dt_est.minute
+    start_minutes = start_h * 60 + start_m
+    end_minutes = end_h * 60 + end_m
+    return start_minutes <= current_minutes <= end_minutes
 
 
 core = CoreEngine()
@@ -148,13 +174,23 @@ while True:
             print("RegimeGuard blocked trading.")
             continue
 
+        # --- Session Window Enforcement ---
+        candle_time = candle.get("open_time") or candle.get("time")
+        if candle_time is not None:
+            if isinstance(candle_time, (int, float)):
+                dt_utc = datetime.utcfromtimestamp(candle_time / 1000)
+            else:
+                dt_utc = candle_time
+            if not _is_within_session(dt_utc, ASSET_CONFIG.get("session", "24/7")):
+                continue
+
         print(f"Current Adaptive Threshold: {controller.current_threshold:.2f}")
         
         signal = core.detect_signal()
-        if not signal:
+        if signal == "tight_trading_range" or not signal:
             continue
 
-        feature_pack = core.build_features(signal)
+        feature_pack = core.build_features(signal, asset_config=ASSET_CONFIG)
         if not feature_pack:
             continue
 
