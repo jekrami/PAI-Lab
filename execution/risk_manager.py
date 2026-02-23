@@ -1,4 +1,4 @@
-# 2026-02-23 | v0.2.0 | Risk manager | Writer: J.Ekrami | Co-writer: Gemini
+# 2026-02-24 | v1.0.0 | Risk manager | Writer: J.Ekrami | Co-writer: Antigravity
 import numpy as np
 import time
 
@@ -8,8 +8,8 @@ class RiskManager:
     def __init__(
         self,
         max_total_drawdown=-15,      # hard capital stop (ATR units)
-        max_daily_loss=-5,           # per session loss limit
-        max_loss_streak=5,           # max consecutive losses
+        max_daily_loss=-12,          # per session loss limit (relaxed for AI bootstrap)
+        max_loss_streak=8,           # max consecutive losses (relaxed for bootstrap)
         volatility_spike_factor=2.5, # abnormal volatility cutoff
         cooldown_seconds=3600        # 1 hour cooldown after hard stop
     ):
@@ -125,3 +125,37 @@ class RiskManager:
                     return True
 
         return False
+
+    # -------------------------------------------------
+    # Tough conditions? (reduce risk, don't block)
+    # Al Brooks: reduce from 1% to 0.3% risk
+    # -------------------------------------------------
+
+    def is_tough_conditions(self, volatility_ratio=None):
+        """
+        Returns True if conditions warrant reduced position sizing.
+        This does NOT block trading — it only signals the position
+        sizer to use RISK_FRACTION_TOUGH instead of RISK_FRACTION_NORMAL.
+
+        Tough triggers:
+        - Loss streak >= threshold (default 3)
+        - Daily returns negative
+        - Volatility spike (short ATR > 1.5× long ATR)
+        """
+        from config import TOUGH_CONDITION_RULES
+
+        # Loss streak check
+        if self.current_loss_streak >= TOUGH_CONDITION_RULES["loss_streak_threshold"]:
+            return True
+
+        # Daily performance check
+        if self.daily_returns and sum(self.daily_returns) < 0:
+            return True
+
+        # Volatility spike check (caller passes volatility_ratio from features)
+        if volatility_ratio is not None:
+            if volatility_ratio > TOUGH_CONDITION_RULES["volatility_spike_factor"]:
+                return True
+
+        return False
+

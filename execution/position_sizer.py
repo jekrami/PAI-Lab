@@ -1,44 +1,60 @@
-# 2026-02-17 | v0.1.0 | Position sizing engine | Writer: J.Ekrami | Co-writer: GPT-5.1
+# 2026-02-24 | v1.0.0 | Position sizing engine | Writer: J.Ekrami | Co-writer: Antigravity
 """
 position_sizer.py
 
-Simple volatility-based position sizing.
+Al Brooks compliant account-based position sizing.
 
-Uses fixed-fractional risk per trade with ATR-based stop distance.
-All returns remain expressed in ATR units for the existing pipeline.
+Risk per trade = fraction of current equity.
+    Normal conditions:  1%   of account
+    Tough conditions:   0.3% of account
+
+Position size = (equity × risk_fraction) / stop_distance_price
+
+This guarantees that every trade risks exactly the intended percentage
+of the account, regardless of volatility or stop distance.
 """
 
+from config import RISK_FRACTION_NORMAL, RISK_FRACTION_TOUGH
+
+
 class PositionSizer:
-    def __init__(self, risk_fraction: float = 0.01, initial_equity: float = 100.0):
+
+    def __init__(self, initial_equity: float = 100.0):
         """
-        risk_fraction: fraction of current equity to risk per trade (0.01 = 1%)
         initial_equity: starting notional equity, used if no equity history yet
         """
-        self.risk_fraction = risk_fraction
         self.initial_equity = initial_equity
 
-    def size(self, atr: float, equity_series):
+    def size(self, stop_distance_price: float, equity_series, tough_mode: bool = False):
         """
-        Compute position size in arbitrary units, based on:
-        - current equity (last point in equity_series)
-        - atr as the stop distance in ATR units
+        Compute position size based on account risk percentage.
 
-        Returns 1.0 if atr is non-positive or equity history is empty,
-        so the existing ATR-based expectancy pipeline keeps working.
+        Args:
+            stop_distance_price: the absolute distance from entry to stop
+                                 (in price units, not ATR multiples).
+            equity_series:       list of equity values; last element = current equity.
+            tough_mode:          True → use 0.3% risk. False → use 1% risk.
+
+        Returns:
+            Position size in notional units.
         """
-        if atr <= 0:
+        if stop_distance_price <= 0:
             return 1.0
 
         current_equity = self.initial_equity
         if equity_series:
             current_equity = equity_series[-1]
 
-        risk_amount = current_equity * self.risk_fraction
-        size = risk_amount / atr if atr > 0 else 1.0
+        if current_equity <= 0:
+            return 0.0
 
-        # Avoid degenerate zero or negative sizes
+        risk_fraction = RISK_FRACTION_TOUGH if tough_mode else RISK_FRACTION_NORMAL
+        risk_amount = current_equity * risk_fraction
+
+        size = risk_amount / stop_distance_price
+
+        # Avoid degenerate sizes
         if size <= 0:
-            return 1.0
+            return 0.0
 
         return size
-

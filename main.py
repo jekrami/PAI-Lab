@@ -1,4 +1,4 @@
-# 2026-02-23 | v0.2.0 | Backtest engine runner | Writer: J.Ekrami | Co-writer: Gemini
+# 2026-02-24 | v3.0.0 | Backtest engine runner | Writer: J.Ekrami | Co-writer: Antigravity
 """
 main.py
 
@@ -25,6 +25,7 @@ import pandas as pd
 import numpy as np
 
 from config import *
+from config import RISK_REWARD_RATIO
 from core.feature_extractor import extract_features
 from intelligence.rolling_controller import RollingController
 from execution.performance_monitor import PerformanceMonitor
@@ -119,33 +120,55 @@ class PAILabEngine:
             allow_trade = self.controller.evaluate_trade(features)
             if not allow_trade:
                 continue
+            # Al Brooks: enter on break of signal bar
+            #   Bullish → enter at signal bar high (breakout above)
+            #   Bearish → enter at signal bar low (breakdown below)
+            direction = signal.get("direction", "bullish")
+            entry_price = row["high"] if direction == "bullish" else row["low"]
 
-            entry_price = row["high"]
+            # Build signal bar for stop placement
+            signal_bar = {
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "open": float(row["open"]),
+                "close": float(row["close"]),
+            }
 
-            # Position sizing is currently advisory – outcome logic remains dynamic based on asset.
-            position_size = self.position_sizer.size(atr, self.monitor.equity)
-
-            # Backtest resolver still returns directional outcome only.
-            outcome = self.resolver.resolve(
-                entry_price, atr, idx, 
+            # Resolve trade with Al Brooks signal-bar-based stops and 2R target
+            result = self.resolver.resolve(
+                entry_price, atr, idx,
                 direction=signal.get("direction", "bullish"),
                 features=features,
-                asset_config=self.asset_config
+                asset_config=self.asset_config,
+                signal_bar=signal_bar
             )
+
+            outcome, stop_dist, target_dist = result
 
             if outcome is None:
                 continue
 
             # -------------------------------------------------
-            # Trade Executed
+            # Trade Executed — Dynamic R:R
             # -------------------------------------------------
 
             self.trade_counter += 1
 
-            trade_return = ATR_TARGET if outcome == 1 else -ATR_STOP
+            # Actual trade return — normalized to ATR units for risk/regime tracking
+            # Win: +target_dist/atr (≥ 2.0 ATR), Loss: -stop_dist/atr (≤ 1.5 ATR)
+            stop_atr = stop_dist / atr if atr > 0 else 1.0
+            target_atr = target_dist / atr if atr > 0 else 2.0
+            trade_return = target_atr if outcome == 1 else -stop_atr
 
-            # Performance tracking
-            self.monitor.record_trade(outcome)
+            # Determine tough conditions for position sizing
+            vol_ratio = features.get("volatility_ratio", 1.0)
+            tough_mode = self.risk_manager.is_tough_conditions(volatility_ratio=vol_ratio)
+
+            # Position size: risk exactly 1% (or 0.3% in tough) of account
+            position_size = self.position_sizer.size(stop_dist, self.monitor.equity, tough_mode=tough_mode)
+
+            # Performance tracking (ATR-normalized returns)
+            self.monitor.record_trade(trade_return)
 
             # Regime tracking
             self.regime_guard.update(trade_return)

@@ -3,7 +3,7 @@ Description: PAI-Lab README — Al Brooks Price Action Trading Engine
 Date: 2026-02-23
 Writer: J.Ekrami
 Co-writer: Antigravity
-Version: 2.1.0
+Version: 3.0.0
 -->
 
 # 📘 PAI-Lab
@@ -17,15 +17,16 @@ Version: 2.1.0
 
 PAI-Lab is a modular, multi-asset trading engine that translates Al Brooks' visual price-action methodology into executable, quantifiable code. It detects structural setups (H1, H2, L1, L2, breakouts, wedge reversals), validates them through follow-through bar confirmation, and manages trades with context-aware targets, trailing stops, and partial exits — all gated by an AI probability layer and capital protection system.
 
-**Current performance (BTC 5m backtest):**
+**Current performance (BTC 5m backtest — pre-AI bootstrap):**
 
 | Metric | Value |
 |---|---|
-| Trades | 155 |
-| Win Rate | 60% |
-| Expectancy | +0.08 ATR |
-| Sharpe Proxy | +0.07 |
-| Max Drawdown | −14.2 ATR |
+| Trades | 79 |
+| Win Rate | 36.7% |
+| Expectancy | −0.05 ATR |
+| R:R Ratio | 1.5:1 (scalp) / 2:1 (swing) |
+| Risk per trade | 1% normal / 0.3% tough |
+| Max Drawdown | −15.1 ATR |
 
 ---
 
@@ -84,10 +85,14 @@ Candle → Memory Buffer (100 bars)
 
 | Feature | Behavior |
 |---|---|
-| **Trailing Stop** | At 0.5× target → stop moves to breakeven. At 1× target → trails behind each new swing |
-| **Partial Exit** | 50% taken at 0.5× target distance, 50% rides to full target |
-| **Scratch Trade** | If < 30% of target distance after 3 bars → exit at breakeven |
-| **Scalp vs Swing** | Context quality score determines target: low quality → 1 ATR scalp, high quality → measured move |
+| **Stop Placement** | ATR-based (1.0 ATR) with signal bar extreme as minimum floor |
+| **Target** | 1.5× stop distance (scalp) or 2× for measured move swings |
+| **Risk per trade** | 1% of account (normal) / 0.3% (tough conditions) |
+| **Trailing Stop** | At 1R → stop moves to breakeven. At 2R → trails 1R behind extreme |
+| **Partial Exit** | 50% taken at 1R profit, 50% rides to full target |
+| **Scratch Trade** | If < 0.3R after 3 bars → exit at breakeven |
+| **Scalp vs Swing** | Context quality score: low → 1.5R scalp, high → 2R measured move |
+| **Tough Mode** | Auto-reduces risk to 0.3% on loss streaks, vol spikes, low WR |
 | **Weekend Close** | Flatten positions Friday 16:00 EST for session-based assets |
 | **Session Window** | Only detect signals within configured session hours |
 
@@ -188,7 +193,8 @@ python dashboard/live_monitor.py
 
 | Version | Changes |
 |---|---|
-| **v2.1.0** | Full Al Brooks compliance: follow-through confirmation, H1/L1, wedge reversals, trailing stops, partial exits, scratch trades, session context, HOD/LOD filter, inside/outside bar detection |
+| **v3.0.0** | Al Brooks risk management: 1.5R/2R targets, 1%/0.3% account risk, ATR-based stops, tough-condition detection, adaptive position sizing, correct directional entries |
+| **v2.1.0** | Follow-through confirmation, H1/L1, wedge reversals, trailing stops, partial exits, scratch trades, session context, HOD/LOD filter, inside/outside bar detection |
 | **v2.0.0** | Asset profiles, TTR detection, explicit H2/L2 two-legged counting, measured move targets, session features, state segregation |
 | **v1.3.0** | Gradio monitoring dashboard, live BTC paper trading |
 | **v1.2.0** | Regime guard, risk manager, state persistence, position sizing |
@@ -209,9 +215,11 @@ python dashboard/live_monitor.py
 
 ## Status
 
-**PAI-Lab v2.1.0 — Al Brooks Price Action Engine**
+**PAI-Lab v3.0.0 — Al Brooks Risk-Managed Price Action Engine**
 
-✅ Profitable on BTC 5m backtest (60% WR, +0.08 expectancy)
+✅ 1.5:1 reward-to-risk (scalp) / 2:1 (swing)
+✅ 1% account risk per trade, 0.3% in tough conditions
+✅ Adaptive tough-condition detection (vol spike, loss streak, low WR)
 ✅ Multi-asset ready (BTC + Gold profiles configured)
 ✅ 6 setup types (H1, H2, L1, L2, breakout, wedge reversal)
 ✅ Context-aware trade management (trailing, scaling, scratch)

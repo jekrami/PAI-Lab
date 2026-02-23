@@ -1,4 +1,4 @@
-# 2026-02-23 | v2.1.0 | Live paper trading runner | Writer: J.Ekrami | Co-writer: Antigravity
+# 2026-02-24 | v3.0.0 | Live paper trading runner | Writer: J.Ekrami | Co-writer: Antigravity
 """
 live_runner.py
 
@@ -23,7 +23,7 @@ from execution.regime_guard import RegimeGuard
 from execution.risk_manager import RiskManager
 from execution.position_sizer import PositionSizer
 from execution.telemetry_logger import TelemetryLogger
-from config import ATR_TARGET, ATR_STOP, ASSETS, DEFAULT_ASSET
+from config import ASSETS, DEFAULT_ASSET
 from data.live_feed import BinanceLiveFeed
 
 # --- Asset Configuration ---
@@ -119,7 +119,13 @@ while True:
         # Resolve open position
         outcome, pos_info = resolver.update(candle)
         if outcome is not None and pos_info is not None:
-            trade_return = ATR_TARGET if outcome == 1 else -ATR_STOP
+            # Normalize trade return to ATR units for risk/regime tracking
+            stop_d = pos_info.get("stop_dist", 1.0)
+            target_d = pos_info.get("target_dist", 2.0)
+            # We need ATR for normalization — compute from recent memory
+            recent_bars = [c for c in [candle] if c]  # placeholder
+            atr_est = stop_d  # fallback: assume stop ≈ 1 ATR
+            trade_return = (target_d / atr_est) if outcome == 1 else -(stop_d / atr_est)
             regime.update(trade_return)
             risk.update(trade_return, [paper_equity])
 
@@ -128,9 +134,8 @@ while True:
                 controller.update_history(used_features, outcome)
                 controller.retrain_if_ready()
 
-            # Paper equity update (ATR-units scaled by size)
+            # Paper equity update (scaled by position size)
             size = pos_info.get("size", 1.0)
-            #global paper_equity
             equity_before = paper_equity
             paper_equity = paper_equity + trade_return * size
             equity_after = paper_equity
@@ -201,10 +206,28 @@ while True:
 
         entry_price = candle["high"]
 
-        # Position sizing is advisory for now – live mode remains ATR-return based.
-        position_size = position_sizer.size(atr, [paper_equity])
+        # Build signal bar for stop placement (Al Brooks: stop at signal bar extreme)
+        signal_bar = {
+            "high": candle["high"],
+            "low": candle["low"],
+            "open": candle["open"],
+            "close": candle["close"],
+        }
 
+        # Determine tough conditions for reduced position sizing
+        vol_ratio = features.get("volatility_ratio", 1.0)
+        tough_mode = risk.is_tough_conditions(volatility_ratio=vol_ratio)
+
+        # Compute stop distance for position sizing
+        from execution.resolvers import compute_stop_target
         direction = signal.get("direction", "bullish")
+        _, _, stop_dist, _ = compute_stop_target(
+            entry_price, atr, direction, signal_bar,
+            asset_config=ASSET_CONFIG, features=features
+        )
+
+        # Position size: risk exactly 1% (or 0.3%) of account
+        position_size = position_sizer.size(stop_dist, [paper_equity], tough_mode=tough_mode)
 
         resolver.open_position(
             entry_price=entry_price,
@@ -213,6 +236,8 @@ while True:
             direction=direction,
             size=position_size,
             entry_time=candle["open_time"],
+            asset_config=ASSET_CONFIG,
+            signal_bar=signal_bar,
         )
     else:
         print("Waiting for new CLOSED 5m candle...")

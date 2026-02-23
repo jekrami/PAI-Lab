@@ -11,12 +11,9 @@ class PerformanceMonitor:
     # Record a trade outcome
     # -------------------------------------------------
 
-    def record_trade(self, outcome):
+    def record_trade(self, trade_return):
 
-        # outcome: 1 = win, 0 = loss
-        from config import ATR_TARGET, ATR_STOP
-
-        trade_return = ATR_TARGET if outcome == 1 else -ATR_STOP
+        # trade_return: actual PnL of the trade (positive or negative)
 
         self.returns.append(trade_return)
 
