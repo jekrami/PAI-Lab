@@ -1,4 +1,4 @@
-# pai_engine.py
+# 2026-02-24 | v4.0.0 | Price action detection engine | Writer: J.Ekrami | Co-writer: Antigravity
 import numpy as np
 from collections import deque
 
@@ -337,24 +337,79 @@ class SecondEntryDetector:
         close_pos = (signal_bar["close"] - signal_bar["low"]) / rng
         body_ratio = body / rng
 
-        # Require strong reversal in the direction of bias
+        # -------------------------------------------------------
+        # 🔍 Micro Double Top / Bottom Detection
+        # Two bars with extremes within 0.15 ATR — a classic Brooks trap
+        # -------------------------------------------------------
+        atr_recent = sum(b["high"] - b["low"] for b in mem[-14:]) / 14
+        micro_double = False
+        if len(mem) >= 3:
+            prev2 = mem[-3]
+            prev1 = mem[-2]
+            if bias == "bullish":
+                # Micro double bottom: two bars testing the same low
+                if abs(prev1["low"] - prev2["low"]) < 0.15 * atr_recent:
+                    micro_double = True
+            else:
+                # Micro double top: two bars testing the same high
+                if abs(prev1["high"] - prev2["high"]) < 0.15 * atr_recent:
+                    micro_double = True
+
+        # Relax signal bar body threshold for micro double setups
+        min_body_ratio = 0.3 if micro_double else 0.4
         if bias == "bullish":
-            if not (close_pos > 0.65 and body_ratio > 0.4): # Slightly relaxed for Gold/Crypto nuances
+            if not (close_pos > 0.65 and body_ratio > min_body_ratio):
                 return None
             direction = "bullish"
         else:
-            if not (close_pos < 0.35 and body_ratio > 0.4):
+            if not (close_pos < 0.35 and body_ratio > min_body_ratio):
                 return None
             direction = "bearish"
 
+        # -------------------------------------------------------
+        # 🔁 H3 / Third-Leg Extension
+        # After a valid H2, check if there is a prior H1 making this an H3
+        # Gate: only in very strong trends (sequence >= 2 implied by H2 itself)
+        # -------------------------------------------------------
+        entry_type = "second_entry"
+        if i > 0:   # there is still buffer to walk back
+            # Attempt a third-leg walk from where the H2 impulse ended
+            j = i - 1
+            h3_state = "pb_leg3"
+            if bias == "bullish":
+                while j > 0 and h3_state == "pb_leg3":
+                    bar = mem[j]
+                    if bar["close"] > bar["open"] and bar["high"] > mem[j-1]["high"]:
+                        h3_state = "bounce_h2"
+                    j -= 1
+                while j > 0 and h3_state == "bounce_h2":
+                    bar = mem[j]
+                    if bar["close"] < bar["open"] and bar["high"] < mem[j-1]["high"]:
+                        entry_type = "third_entry"
+                        break
+                    j -= 1
+            else:
+                while j > 0 and h3_state == "pb_leg3":
+                    bar = mem[j]
+                    if bar["close"] < bar["open"] and bar["low"] < mem[j-1]["low"]:
+                        h3_state = "bounce_l2"
+                    j -= 1
+                while j > 0 and h3_state == "bounce_l2":
+                    bar = mem[j]
+                    if bar["close"] > bar["open"] and bar["low"] > mem[j-1]["low"]:
+                        entry_type = "third_entry"
+                        break
+                    j -= 1
+
         return {
-            "type": "second_entry",
+            "type": entry_type,
             "direction": direction,
             "time": signal_bar["time"],
             "price": signal_bar["close"],
             "pullback_depth": depth,
             "pullback_bars": pullback_bars,
-            "leg1_h1": True  # Flag to indicate explicit leg check passed
+            "leg1_h1": True,
+            "micro_double": micro_double,
         }
 
 
@@ -570,4 +625,98 @@ class MarketEnvironmentClassifier:
         ):
             return "structural_bear_trend"
 
-        return "trading_range"
+
+class InsideBarDetector:
+    """
+    Inside Bar Setup (Al Brooks: compression before continuation).
+    Fires when the current bar is an inside bar after a strong trend bar
+    in the direction of the bias. Entry is on break of the mother bar.
+    """
+
+    @staticmethod
+    def detect(memory, bias, lookback=10):
+        if bias not in ("bullish", "bearish"):
+            return None
+        if len(memory) < 3:
+            return None
+
+        mem = memory[-lookback:]
+        current = mem[-1]   # candidate inside bar
+        mother = mem[-2]    # must be the strong trend bar
+
+        # Check: current bar is inside the mother bar
+        if not (current["high"] <= mother["high"] and current["low"] >= mother["low"]):
+            return None
+
+        # Mother bar must be a strong trend bar in the bias direction
+        m_rng = mother["high"] - mother["low"]
+        if m_rng == 0:
+            return None
+        m_body = abs(mother["close"] - mother["open"])
+        m_body_ratio = m_body / m_rng
+        m_close_pos = (mother["close"] - mother["low"]) / m_rng
+
+        if bias == "bullish":
+            if not (m_close_pos > 0.75 and m_body_ratio > 0.5):
+                return None
+            direction = "bullish"
+        else:
+            if not (m_close_pos < 0.25 and m_body_ratio > 0.5):
+                return None
+            direction = "bearish"
+
+        depth = mother["high"] - mother["low"]  # mother bar range as reference
+        return {
+            "type": "inside_bar_entry",
+            "direction": direction,
+            "time": current["time"],
+            "price": current["close"],
+            "pullback_depth": depth,
+            "pullback_bars": 1,
+            "mother_bar_high": mother["high"],
+            "mother_bar_low": mother["low"],
+        }
+
+
+class SwingPivotTracker:
+    """
+    Tracks swing highs and swing lows to determine the Always-In direction
+    per Al Brooks' definition: based on the last significant swing pivot,
+    not a moving average or slope.
+
+    A pivot high: bar whose high is the highest of a 3-bar window.
+    A pivot low : bar whose low  is the lowest  of a 3-bar window.
+    """
+
+    @staticmethod
+    def always_in_direction(memory, lookback=40):
+        """Returns 'bullish', 'bearish', or 'neutral'."""
+        if len(memory) < 10:
+            return "neutral"
+
+        mem = memory[-lookback:]
+        pivot_highs = []
+        pivot_lows  = []
+
+        for k in range(1, len(mem) - 1):
+            if mem[k]["high"] >= mem[k-1]["high"] and mem[k]["high"] >= mem[k+1]["high"]:
+                pivot_highs.append((k, mem[k]["high"]))
+            if mem[k]["low"] <= mem[k-1]["low"] and mem[k]["low"] <= mem[k+1]["low"]:
+                pivot_lows.append((k, mem[k]["low"]))
+
+        if len(pivot_highs) < 2 or len(pivot_lows) < 2:
+            return "neutral"  # not enough pivots to judge
+
+        last_ph = pivot_highs[-1][1]
+        prev_ph = pivot_highs[-2][1]
+        last_pl = pivot_lows[-1][1]
+        prev_pl = pivot_lows[-2][1]
+
+        # Higher highs AND higher lows → always-in long
+        if last_ph > prev_ph and last_pl > prev_pl:
+            return "bullish"
+        # Lower highs AND lower lows → always-in short
+        if last_ph < prev_ph and last_pl < prev_pl:
+            return "bearish"
+        # Mixed: two-sided market
+        return "neutral"
