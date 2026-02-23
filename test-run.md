@@ -3,7 +3,7 @@ Description: PAI-Lab — Live Test Run Guide
 Date: 2026-02-23
 Writer: J.Ekrami
 Co-writer: Antigravity
-Version: 2.1.0
+Version: 4.0.0
 -->
 
 # PAI-Lab — Live Test Run Guide
@@ -73,9 +73,12 @@ print(f"Total trades: {state['trade_counter']}")
 
 | Timeframe | Behavior |
 |---|---|
-| **Day 1–2** | AI not trained yet — trades on pure Al Brooks rules. This is the bootstrap phase. |
+| **Day 1–2** | AI not trained yet — trades on pure Al Brooks rules. This is the bootstrap phase. Expect fewer trades now due to strict v4.0.0 context filters (Prior Day H/L, Opening Range blockade). |
 | **After ~100 trades** | AI activates. Adaptive threshold shifts. Some setups get filtered. |
 | **Ongoing** | Model retrains on last 100 trades, adapting to changing conditions. |
+
+> [!NOTE]
+> **Session Enforcement:** If you switch to an asset like Gold (`XAUUSD`), remember that the engine will now STRICTLY block trades outside `08:00-17:00_EST` and during the first 2 bars of the session (London/NY open avoidance). BTC (`BTCUSDT`) is still traded 24/7.
 
 ---
 
