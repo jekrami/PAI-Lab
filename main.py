@@ -1,4 +1,4 @@
-# 2026-02-17 | v0.1.1 | Backtest engine runner | Writer: J.Ekrami | Co-writer: GPT-5.1
+# 2026-02-23 | v0.2.0 | Backtest engine runner | Writer: J.Ekrami | Co-writer: Gemini
 """
 main.py
 
@@ -123,7 +123,7 @@ class PAILabEngine:
             position_size = self.position_sizer.size(atr, self.monitor.equity)
 
             # Backtest resolver still returns directional outcome only.
-            outcome = self.resolver.resolve(entry_price, atr, idx)
+            outcome = self.resolver.resolve(entry_price, atr, idx, direction=signal.get("direction", "bullish"))
 
             if outcome is None:
                 continue

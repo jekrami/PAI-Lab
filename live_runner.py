@@ -1,4 +1,4 @@
-# 2026-02-17 | v0.1.2 | Live paper trading runner | Writer: J.Ekrami | Co-writer: GPT-5.1
+# 2026-02-23 | v0.2.0 | Live paper trading runner | Writer: J.Ekrami | Co-writer: Gemini
 """
 live_runner.py
 
@@ -12,6 +12,8 @@ Fully independent live paper trading mode.
 """
 
 import time
+import pandas as pd
+from datetime import datetime
 from engine.core_engine import CoreEngine
 from execution.resolvers import LiveResolver
 from intelligence.rolling_controller import RollingController
@@ -93,7 +95,7 @@ while True:
         if outcome is not None and pos_info is not None:
             trade_return = ATR_TARGET if outcome == 1 else -ATR_STOP
             regime.update(trade_return)
-            risk.update(trade_return, [])
+            risk.update(trade_return, [paper_equity])
 
             used_features = pos_info.get("features")
             if used_features is not None:

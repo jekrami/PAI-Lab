@@ -1,15 +1,3 @@
-Perfect.
-This is exactly the right thing to do before moving forward.
-
-You are no longer experimenting — you are building a system.
-A system must be documented.
-
-Below is a clean, professional `README.md` reflecting the current state of **PAI-Lab v1.2**.
-
-You can copy this directly into `README.md` at project root.
-
----
-
 # 📘 PAI-Lab
 
 **Price Action Intelligence Laboratory**
@@ -241,12 +229,43 @@ It is a trading engine framework.
 
 ---
 
-## 11. Status
+## 11. Monitoring & Observability
 
-**PAI-Lab v1.2 — Adaptive Engine with Survivability Layers**
+**Real-Time Dashboard (v1.3+)**
+
+PAI-Lab now includes a web-based monitoring dashboard built with Gradio.
+
+**Start Dashboard:**
+
+```bash
+python dashboard/live_monitor.py
+```
+
+Access at: `http://localhost:7860`
+
+**Dashboard Features:**
+
+* Live equity curve visualization
+* Recent trades table (last 20 trades)
+* Current position status
+* Regime status indicator (active/paused)
+* Risk metrics panel
+* System health monitoring
+* Auto-refresh every 60 seconds
+
+**Use Case:**
+
+Monitor live paper trading operations without watching terminal logs. Perfect for running `live_runner.py` on a remote server and checking status from any browser.
+
+---
+
+## 12. Status
+
+**PAI-Lab v1.3 — Adaptive Engine with Monitoring Dashboard**
 
 Stable
 Persistent
 Chronologically sound
 Ready for forward validation
+Operational visibility enabled
 

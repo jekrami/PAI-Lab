@@ -1,4 +1,6 @@
+# 2026-02-23 | v0.2.0 | Risk manager | Writer: J.Ekrami | Co-writer: Gemini
 import numpy as np
+import time
 
 
 class RiskManager:
@@ -8,24 +10,33 @@ class RiskManager:
         max_total_drawdown=-15,      # hard capital stop (ATR units)
         max_daily_loss=-5,           # per session loss limit
         max_loss_streak=5,           # max consecutive losses
-        volatility_spike_factor=2.5  # abnormal volatility cutoff
+        volatility_spike_factor=2.5, # abnormal volatility cutoff
+        cooldown_seconds=3600        # 1 hour cooldown after hard stop
     ):
 
         self.max_total_drawdown = max_total_drawdown
         self.max_daily_loss = max_daily_loss
         self.max_loss_streak = max_loss_streak
         self.volatility_spike_factor = volatility_spike_factor
+        self.cooldown_seconds = cooldown_seconds
 
         self.daily_returns = []
         self.total_equity = []
         self.current_loss_streak = 0
         self.hard_stop_triggered = False
+        self.hard_stop_time = None
+
+        # Daily reset tracking
+        self._session_start = time.time()
+        self._session_duration = 24 * 3600  # 24 hours
 
     # -------------------------------------------------
     # Update after trade
     # -------------------------------------------------
 
     def update(self, trade_return, equity_series):
+
+        self._check_session_reset()
 
         self.daily_returns.append(trade_return)
         self.total_equity = equity_series
@@ -37,6 +48,16 @@ class RiskManager:
             self.current_loss_streak = 0
 
         self._evaluate()
+
+    # -------------------------------------------------
+    # Reset daily counters each session
+    # -------------------------------------------------
+
+    def _check_session_reset(self):
+        now = time.time()
+        if now - self._session_start >= self._session_duration:
+            self.daily_returns = []
+            self._session_start = now
 
     # -------------------------------------------------
     # Evaluate capital risk
@@ -52,12 +73,15 @@ class RiskManager:
         # Hard stop conditions
         if total_drawdown <= self.max_total_drawdown:
             self.hard_stop_triggered = True
+            self.hard_stop_time = time.time()
 
         if sum(self.daily_returns) <= self.max_daily_loss:
             self.hard_stop_triggered = True
+            self.hard_stop_time = time.time()
 
         if self.current_loss_streak >= self.max_loss_streak:
             self.hard_stop_triggered = True
+            self.hard_stop_time = time.time()
 
     # -------------------------------------------------
     # Volatility protection
@@ -80,8 +104,24 @@ class RiskManager:
         return True
 
     # -------------------------------------------------
-    # Allow trading?
+    # Allow trading? (with cooldown recovery)
     # -------------------------------------------------
 
     def allow_trading(self):
-        return not self.hard_stop_triggered
+        if not self.hard_stop_triggered:
+            return True
+
+        # Allow recovery after cooldown (except total drawdown)
+        if self.hard_stop_time is not None:
+            elapsed = time.time() - self.hard_stop_time
+            if elapsed >= self.cooldown_seconds:
+                # Only recover from streak/daily stops, not total drawdown
+                if self.total_equity and min(self.total_equity) > self.max_total_drawdown:
+                    self.hard_stop_triggered = False
+                    self.current_loss_streak = 0
+                    self.daily_returns = []
+                    self._session_start = time.time()
+                    print("[RiskManager] Cooldown elapsed. Trading resumed.")
+                    return True
+
+        return False

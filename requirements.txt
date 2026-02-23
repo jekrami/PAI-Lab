@@ -1,0 +1,35 @@
+# 2026-02-17 | v1.0.0 | PAI-Lab Core Requirements | Writer: J.Ekrami | Co-writer: Gemini 2.0 Flash Thinking
+# PAI-Lab Requirements - Core Dependencies Only
+# For full dependency list with exact versions, see requirements_full.txt
+
+# Core Trading Engine
+pandas>=2.0.0
+numpy>=1.24.0
+scikit-learn>=1.3.0
+ccxt>=4.0.0
+
+# Dashboard (Phase 1.2)
+gradio>=6.0.0
+plotly>=6.0.0
+
+# Optional Dependencies (commented out - uncomment as needed)
+# python-telegram-bot>=20.0  # For Telegram alerts (Phase 1.3)
+# psycopg2-binary>=2.9.0     # For PostgreSQL database migration (Phase 3)
+# SQLAlchemy>=2.0.0          # For ORM if database migration
+# ta-lib>=0.4.0              # For additional technical indicators
+
+# Installation Instructions:
+# 
+# 1. Create virtual environment (if not exists):
+#    python -m venv .venv
+#
+# 2. Activate virtual environment:
+#    Windows PowerShell: .venv\Scripts\Activate.ps1
+#    Windows CMD: .venv\Scripts\activate.bat
+#    Linux/Mac: source .venv/bin/activate
+#
+# 3. Install core requirements:
+#    pip install -r requirements.txt
+#
+# 4. Or install with exact versions (recommended for production):
+#    pip install -r requirements_full.txt

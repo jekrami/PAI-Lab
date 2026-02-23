@@ -1,4 +1,4 @@
-# 2026-02-17 | v0.1.0 | Trade resolution layer | Writer: J.Ekrami | Co-writer: GPT-5.1
+# 2026-02-23 | v0.2.0 | Trade resolution layer | Writer: J.Ekrami | Co-writer: Gemini
 """
 resolvers.py
 
@@ -27,7 +27,7 @@ class BacktestResolver:
     def __init__(self, df):
         self.df = df
 
-    def resolve(self, entry_price, atr, idx):
+    def resolve(self, entry_price, atr, idx, direction="bullish"):
 
         for j in range(1, 11):
 
@@ -36,14 +36,16 @@ class BacktestResolver:
 
             future = self.df.iloc[idx + j]
 
-            high_move = future["high"] - entry_price
-            low_move = future["low"] - entry_price
-
-            if high_move >= ATR_TARGET * atr:
-                return 1
-
-            if low_move <= -ATR_STOP * atr:
-                return 0
+            if direction == "bullish":
+                if future["high"] - entry_price >= ATR_TARGET * atr:
+                    return 1
+                if future["low"] - entry_price <= -ATR_STOP * atr:
+                    return 0
+            else:  # bearish
+                if entry_price - future["low"] >= ATR_TARGET * atr:
+                    return 1
+                if future["high"] - entry_price >= ATR_STOP * atr:
+                    return 0
 
         return None
 
@@ -62,17 +64,24 @@ class LiveResolver:
 
     def open_position(self, entry_price, atr, features, direction, size, entry_time):
 
+        if direction == "bearish":
+            stop = entry_price + ATR_STOP * atr
+            target = entry_price - ATR_TARGET * atr
+        else:
+            stop = entry_price - ATR_STOP * atr
+            target = entry_price + ATR_TARGET * atr
+
         self.position = {
             "entry": entry_price,
-            "stop": entry_price - ATR_STOP * atr,
-            "target": entry_price + ATR_TARGET * atr,
+            "stop": stop,
+            "target": target,
             "features": features,
             "direction": direction,
             "size": size,
             "entry_time": entry_time,
         }
 
-        print(f"[LIVE] Position opened @ {entry_price}")
+        print(f"[LIVE] {direction.upper()} position opened @ {entry_price}")
 
     def update(self, candle):
 
