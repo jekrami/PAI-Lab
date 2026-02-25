@@ -15,7 +15,7 @@ Fully independent live paper trading mode.
 import time
 import re
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from engine.core_engine import CoreEngine
 from execution.resolvers import LiveResolver
 from intelligence.rolling_controller import RollingController
@@ -183,7 +183,7 @@ while True:
         candle_time = candle.get("open_time") or candle.get("time")
         if candle_time is not None:
             if isinstance(candle_time, (int, float)):
-                dt_utc = datetime.fromtimestamp(candle_time / 1000, datetime.UTC)
+                dt_utc = datetime.fromtimestamp(candle_time / 1000, timezone.utc)
             else:
                 dt_utc = candle_time
             if not _is_within_session(dt_utc, ASSET_CONFIG.get("session", "24/7")):
