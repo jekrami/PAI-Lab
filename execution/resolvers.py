@@ -1,4 +1,4 @@
-# 2026-02-24 | v3.0.0 | Trade resolution layer | Writer: J.Ekrami | Co-writer: Antigravity
+# 2026-02-25 | v3.1.0 | Trade resolution layer | Writer: J.Ekrami | Co-writer: Antigravity
 """
 resolvers.py
 
@@ -26,7 +26,7 @@ EST_OFFSET = timedelta(hours=-5)
 
 
 def compute_stop_target(entry_price, atr, direction, signal_bar,
-                        asset_config=None, features=None, context_quality=None):
+                        asset_config=None, features=None, context_quality=None, env=None):
     """
     Compute stop and target distances using Al Brooks' signal-bar-based placement.
 
@@ -55,8 +55,15 @@ def compute_stop_target(entry_price, atr, direction, signal_bar,
         else:
             stop_price = entry_price + stop_dist
 
-    # Target: default R:R (scalp)
-    target_dist = stop_dist * RISK_REWARD_RATIO
+    # Target: dynamic based on environment
+    
+    # Baseline R:R
+    if env == "trading_range":
+        # Al Brooks: Buy low, sell high, and scalp holding for 1R in a trading range
+        target_dist = stop_dist * 1.0
+    else:
+        # Trend continuation expects 2R+
+        target_dist = stop_dist * RISK_REWARD_RATIO
 
     # Measured move override: if impulse > default, use it (swing territory)
     if asset_config and asset_config.get("target_mode") == "measured_move" and features:
@@ -65,9 +72,10 @@ def compute_stop_target(entry_price, atr, direction, signal_bar,
             # Cap swing target at SWING_RR × stop_dist
             target_dist = min(impulse_raw, stop_dist * SWING_RR)
 
-    # Scalp cap: context_quality < 0.5 → reduce target, but never below SCALP_MIN_RR
+    # Context Quality reduction override
     if context_quality is not None and context_quality < 0.5:
-        scalp_target = stop_dist * SCALP_MIN_RR
+        # Minimum scalp 1R
+        scalp_target = stop_dist * 1.0
         target_dist = min(target_dist, scalp_target)
 
     if direction == "bullish":
@@ -88,7 +96,7 @@ class BacktestResolver:
         self.df = df
 
     def resolve(self, entry_price, atr, idx, direction="bullish",
-                features=None, asset_config=None, signal_bar=None):
+                features=None, asset_config=None, signal_bar=None, env=None):
         """
         Resolve trade outcome using Al Brooks 2R logic.
 
@@ -113,7 +121,7 @@ class BacktestResolver:
 
         stop_price, target_price, stop_dist, target_dist = compute_stop_target(
             entry_price, atr, direction, signal_bar,
-            asset_config=asset_config, features=features
+            asset_config=asset_config, features=features, env=env
         )
 
         for j in range(1, 31):
@@ -150,7 +158,7 @@ class LiveResolver:
         return self.position is not None
 
     def open_position(self, entry_price, atr, features, direction, size, entry_time,
-                      asset_config=None, context_quality=None, signal_bar=None):
+                      asset_config=None, context_quality=None, signal_bar=None, env=None):
 
         # Build a pseudo signal bar if not provided
         if signal_bar is None:
@@ -164,7 +172,7 @@ class LiveResolver:
         stop_price, target_price, stop_dist, target_dist = compute_stop_target(
             entry_price, atr, direction, signal_bar,
             asset_config=asset_config, features=features,
-            context_quality=context_quality
+            context_quality=context_quality, env=env
         )
 
         self.position = {
@@ -204,7 +212,7 @@ class LiveResolver:
             candle_time = candle.get("open_time") or candle.get("time")
             if candle_time is not None:
                 if isinstance(candle_time, (int, float)):
-                    dt_utc = datetime.utcfromtimestamp(candle_time / 1000)
+                    dt_utc = datetime.fromtimestamp(candle_time / 1000, timezone.utc)
                 else:
                     dt_utc = candle_time
                 dt_est = dt_utc + EST_OFFSET

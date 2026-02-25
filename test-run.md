@@ -1,112 +1,41 @@
-<!--
-Description: PAI-Lab — Live Test Run Guide
-Date: 2026-02-23
-Writer: J.Ekrami
-Co-writer: Antigravity
-Version: 4.0.0
--->
+# PAI-Lab Execution Guide
 
-# PAI-Lab — Live Test Run Guide
-
-## 1. Starting Live Paper Trading
+## Starting Fresh
+If you want to start a brand new run from scratch (discarding all previous ML training, engine state, and logs):
 
 ```bash
+# 1. Activate the environment
 cd /path/to/PAI-Lab
-pip install -r requirements.txt
-nohup python live_runner.py > output.log 2>&1 &
+source .venv/bin/activate  # Or .venv\Scripts\activate on Windows
+
+# 2. Delete the state files to reset the machine learning context
+rm state/engine_state_*.pkl
+
+# 3. Delete the old trade logs to reset PnL
+rm logs/trades.csv
 ```
 
-> Use `nohup` or `screen` so it survives SSH disconnects.
-> Check it's running: `ps aux | grep live_runner`
+## Running the Live Engine in `screen`
 
----
-
-## 2. Log & Report Locations
-
-| Path | What's Inside |
-|---|---|
-| `logs/live_trades.csv` | Every trade: direction, entry/exit price, size, ATR, outcome, equity, probability, threshold |
-| `logs/live_metrics.csv` | Per-trade snapshot: equity, rolling expectancy, winrate, volatility, adaptive threshold |
-| `logs/live_regime_events.csv` | Regime state changes: pauses/resumes with z-scores |
-| `state/engine_state_BTCUSDT.pkl` | Full AI state: model weights, feature history, equity, trade counter (survives restarts) |
-| `output.log` | Raw console output (if using `nohup`) |
-
-All CSV logs are **append-only** — watch in real time:
-```bash
-tail -f logs/live_trades.csv
-```
-
----
-
-## 3. Verifying AI Training
-
-The AI trains itself after collecting **100 trades**. Before that, all valid setups are taken (pure price-action rules).
-
-### Quick Checks
-
-**Console / output.log:**
-```
-Current Adaptive Threshold: 0.65   ← default, not trained yet
-Current Adaptive Threshold: 0.55   ← model trained and optimized
-```
-
-**CSV check:**
-```bash
-# See threshold changes over time
-cut -d',' -f8 logs/live_metrics.csv | tail -20
-```
-
-**Python check:**
-```python
-import pickle
-with open("state/engine_state_BTCUSDT.pkl", "rb") as f:
-    state = pickle.load(f)
-print(f"Trained: {state['trained']}")
-print(f"Samples: {len(state['feature_history'])}")
-print(f"Threshold: {state['current_threshold']}")
-print(f"Total trades: {state['trade_counter']}")
-```
-
----
-
-## 4. What to Expect
-
-| Timeframe | Behavior |
-|---|---|
-| **Day 1–2** | AI not trained yet — trades on pure Al Brooks rules. This is the bootstrap phase. Expect fewer trades now due to strict v4.0.0 context filters (Prior Day H/L, Opening Range blockade). |
-| **After ~100 trades** | AI activates. Adaptive threshold shifts. Some setups get filtered. |
-| **Ongoing** | Model retrains on last 100 trades, adapting to changing conditions. |
-
-> [!NOTE]
-> **Session Enforcement:** If you switch to an asset like Gold (`XAUUSD`), remember that the engine will now STRICTLY block trades outside `08:00-17:00_EST` and during the first 2 bars of the session (London/NY open avoidance). BTC (`BTCUSDT`) is still traded 24/7.
-
----
-
-## 5. Dashboard (Optional)
+Since the AI needs to process live market data 24/7, you should run it inside a `screen` session so it doesn't shut down when you close your terminal.
 
 ```bash
-python dashboard/live_monitor.py
-# Access at http://your-server-ip:7860
+# Start a new screen session named "pailab"
+screen -S pailab
+
+# Inside the screen, activate the environment and run the engine
+source .venv/bin/activate
+python live_runner.py
 ```
 
-Shows equity curve, recent trades, regime status, and risk metrics. Auto-refreshes every 60s.
+### Screen Commands:
+- **To detach** (leave it running in the background): Press `Ctrl+A`, then press `D`.
+- **To reattach** (return to the running session): `screen -r pailab`
+- **To see all running screen sessions:** `screen -ls`
 
 ---
 
-## 6. Stopping & Resuming
-
-**Stop:**
-```bash
-kill $(pgrep -f live_runner.py)
-```
-
-**Resume:** Just run `python live_runner.py` again — the `StateManager` loads the saved state from `state/engine_state_BTCUSDT.pkl` automatically. No data loss, no replay.
-
----
-
-## 7. Next Steps (After Test Run)
-
-- [ ] Review `logs/live_trades.csv` — check win/loss patterns
-- [ ] Verify AI threshold adapted (should differ from 0.65)
-- [ ] Review equity curve via dashboard or `tools/plot_performance.py`
-- [ ] Proceed to real trading bot integration
+## Machine Learning "Warm-up" Phase (Backtesting vs Live)
+*Note on the AI Model:* The `RollingController` requires at least 100 historical trades of training data before it becomes statistically accurate. 
+- In **Backtesting** (`main.py`), the engine is now configured to automatically "warm up" on the first 40,000 candles (it will take trades blindly to gather data without recording imaginary PnL).
+- In **Live Trading** (`live_runner.py`), the engine loads the exact same `state/engine_state_BTCUSDT.pkl` file. Therefore, you should **Run `main.py` first** to quickly train the AI over the past 3-4 months of data, let it save the trained `state.pkl` file, and *then* run `live_runner.py`.

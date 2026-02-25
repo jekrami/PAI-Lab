@@ -1,9 +1,9 @@
-# 2026-02-24 | v0.3.0 | Feature extractor | Writer: J.Ekrami | Co-writer: Antigravity
-from datetime import datetime
+# 2026-02-25 | v0.3.1 | Feature extractor | Writer: J.Ekrami | Co-writer: Antigravity
+from datetime import datetime, timezone
 
 def _get_datetime(t):
     if isinstance(t, (int, float)):
-        return datetime.utcfromtimestamp(t / 1000)
+        return datetime.fromtimestamp(t / 1000, timezone.utc)
     return t
 
 def extract_features(mem, signal, atr, long_atr, next_bar, signal_bar, asset_config=None):

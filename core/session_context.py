@@ -1,4 +1,4 @@
-# 2026-02-23 | v2.1.0 | Session context manager | Writer: J.Ekrami | Co-writer: Antigravity
+# 2026-02-25 | v2.1.1 | Session context manager | Writer: J.Ekrami | Co-writer: Antigravity
 """
 session_context.py
 
@@ -7,7 +7,7 @@ Tracks session open price, first-hour range, prior day high/low,
 and whether the current bar is within the first hour of the session.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # EST offset (UTC-5 fixed proxy)
 EST_OFFSET = timedelta(hours=-5)
@@ -90,5 +90,5 @@ class SessionContext:
 
     def _get_datetime(self, t):
         if isinstance(t, (int, float)):
-            return datetime.utcfromtimestamp(t / 1000)
+            return datetime.fromtimestamp(t / 1000, timezone.utc)
         return t

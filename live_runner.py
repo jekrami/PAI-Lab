@@ -1,4 +1,4 @@
-# 2026-02-25 | v3.0.1 | Live paper trading runner | Writer: J.Ekrami | Co-writer: Antigravity
+# 2026-02-25 | v3.1.0 | Live paper trading runner | Writer: J.Ekrami | Co-writer: Antigravity
 """
 live_runner.py
 
@@ -116,8 +116,16 @@ while True:
             "close": candle["close"],
         })
 
-        # Resolve open position
         outcome, pos_info = resolver.update(candle)
+        
+        # Ensure we have a valid UTC datetime to pass to risk manager
+        candle_dt = candle.get("open_time") or candle.get("time")
+        if isinstance(candle_dt, (int, float)):
+            from datetime import timezone
+            dt_utc = datetime.fromtimestamp(candle_dt / 1000, timezone.utc)
+        else:
+            dt_utc = candle_dt
+            
         if outcome is not None and pos_info is not None:
             # Normalize trade return to ATR units for risk/regime tracking
             stop_d = pos_info.get("stop_dist", 1.0)
@@ -127,7 +135,7 @@ while True:
             atr_est = stop_d  # fallback: assume stop ≈ 1 ATR
             trade_return = (target_d / atr_est) if outcome == 1 else -(stop_d / atr_est)
             regime.update(trade_return)
-            risk.update(trade_return, [paper_equity])
+            risk.update(trade_return, [paper_equity], current_time=dt_utc)
 
             used_features = pos_info.get("features")
             if used_features is not None:
@@ -171,8 +179,8 @@ while True:
         if resolver.has_open_position():
             continue
 
-        if not risk.allow_trading():
-            print("RiskManager blocked trading.")
+        if not risk.allow_trading(current_time=dt_utc):
+            print("RiskManager blocked trading (cooldown/drawdown limits).")
             continue
 
         if not regime.allow_trading():
@@ -199,7 +207,7 @@ while True:
         if not feature_pack:
             continue
 
-        features, atr = feature_pack
+        features, atr, is_suboptimal, env = feature_pack
 
         if not controller.evaluate_trade(features):
             continue
@@ -217,13 +225,15 @@ while True:
         # Determine tough conditions for reduced position sizing
         vol_ratio = features.get("volatility_ratio", 1.0)
         tough_mode = risk.is_tough_conditions(volatility_ratio=vol_ratio)
+        if is_suboptimal:
+            tough_mode = True  # Force reduced position size for context penalty
 
         # Compute stop distance for position sizing
         from execution.resolvers import compute_stop_target
         direction = signal.get("direction", "bullish")
         _, _, stop_dist, _ = compute_stop_target(
             entry_price, atr, direction, signal_bar,
-            asset_config=ASSET_CONFIG, features=features
+            asset_config=ASSET_CONFIG, features=features, env=env
         )
 
         # Position size: risk exactly 1% (or 0.3%) of account
@@ -238,6 +248,7 @@ while True:
             entry_time=candle["open_time"],
             asset_config=ASSET_CONFIG,
             signal_bar=signal_bar,
+            env=env
         )
     else:
         print("Waiting for new CLOSED 5m candle...")

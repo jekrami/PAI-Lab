@@ -1,3 +1,4 @@
+# 2026-02-25 | v1.1.0 | BTC 5m data downloader | Writer: J.Ekrami | Co-writer: Antigravity
 import requests
 import pandas as pd
 import time
@@ -26,7 +27,17 @@ while len(all_data) < TOTAL_BARS:
         params["endTime"] = end_time
 
     response = requests.get(BASE_URL, params=params)
+
+    if response.status_code != 200:
+        print("HTTP Error:", response.status_code)
+        print(response.text)
+        break
+
     data = response.json()
+
+    if not isinstance(data, list):
+        print("API Error:", data)
+        break
 
     if not data:
         break
@@ -36,7 +47,7 @@ while len(all_data) < TOTAL_BARS:
     end_time = data[0][0] - 1  # move backward
 
     print(f"Downloaded {len(all_data)} bars...")
-    time.sleep(0.5)
+    time.sleep(1)
 
 # Trim to exact amount
 all_data = all_data[-TOTAL_BARS:]
@@ -46,7 +57,7 @@ df = pd.DataFrame(all_data, columns=[
     "close_time","qav","num_trades","taker_base","taker_quote","ignore"
 ])
 
-df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
+df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
 
 df = df[["open_time","open","high","low","close","volume"]]
 

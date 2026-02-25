@@ -1,4 +1,4 @@
-# 2026-02-24 | v3.0.0 | Core signal and feature engine | Writer: J.Ekrami | Co-writer: Antigravity
+# 2026-02-25 | v3.1.0 | Context-Aware Core signal engine | Writer: J.Ekrami | Co-writer: Antigravity
 """
 core_engine.py
 
@@ -61,10 +61,10 @@ class CoreEngine:
         # Track session open (for London/NY open suppression)
         candle_date = None
         try:
-            from datetime import datetime, timedelta
+            from datetime import datetime, timedelta, timezone
             t = candle.get("time") or candle.get("open_time")
             if isinstance(t, (int, float)):
-                candle_date = datetime.utcfromtimestamp(t / 1000).date()
+                candle_date = datetime.fromtimestamp(t / 1000, timezone.utc).date()
             else:
                 candle_date = t.date() if hasattr(t, 'date') else None
         except Exception:
@@ -91,10 +91,10 @@ class CoreEngine:
         session_str = (self.session_ctx.session_str or "24/7").strip()
         if session_str != "24/7":
             try:
-                from datetime import datetime, timedelta
+                from datetime import datetime, timedelta, timezone
                 EST_OFFSET = timedelta(hours=-5)
                 t = mem[-1].get("time") or mem[-1].get("open_time")
-                dt_est = (datetime.utcfromtimestamp(t / 1000) if isinstance(t, (int, float)) else t) + EST_OFFSET
+                dt_est = (datetime.fromtimestamp(t / 1000, timezone.utc) if isinstance(t, (int, float)) else t) + EST_OFFSET
                 time_part = session_str.split("_")[0]
                 start_str, end_str = time_part.split("-")
                 sh, sm = int(start_str.split(":")[0]), int(start_str.split(":")[1])
@@ -284,7 +284,10 @@ class CoreEngine:
             long_atr = sum(long_ranges) / len(long_ranges)
             signal_bar = mem[-1]
             features = extract_features(mem, signal, atr, long_atr, signal_bar, signal_bar, asset_config=asset_config)
-            return features, atr
+            features["micro_double"] = 1.0 if signal.get("micro_double") else 0.0
+            features["is_third_entry"] = 1.0 if signal.get("type") == "third_entry" else 0.0
+            env = MarketEnvironmentClassifier.classify(mem, TrendAnalyzer.analyze(mem), PriceActionAnalyzer.trend_bar_info(mem))
+            return features, atr, False, env
 
         if atr > 0 and signal["pullback_depth"] / atr < DEPTH_THRESHOLD_ATR:
             return None
@@ -301,26 +304,60 @@ class CoreEngine:
 
         features = extract_features(mem, signal, atr, long_atr, signal_bar, signal_bar, asset_config=asset_config)
 
-        # --- HOD/LOD Hard Filter ---
-        if signal.get("direction") == "bullish" and features.get("dist_to_hod_atr", 999) < 0.5:
+        # --- Dynamic Hard Filters based on Market Context (Version 3.1.0) ---
+        # Instead of strict rigid filtering, we apply context.
+        # Strong trends can break resistance. Ranges bounce off resistance.
+        
+        env = MarketEnvironmentClassifier.classify(mem, TrendAnalyzer.analyze(mem), PriceActionAnalyzer.trend_bar_info(mem))
+        
+        if env == "structural_bull_trend":
+            hod_limit = 0.1
+            pdh_limit = 0.1
+            orh_limit = 0.1
+        else:
+            hod_limit = 0.5
+            pdh_limit = 0.5
+            orh_limit = 0.3
+
+        if env == "structural_bear_trend":
+            lod_limit = 0.1
+            pdl_limit = 0.1
+            orl_limit = 0.1
+        else:
+            lod_limit = 0.5
+            pdl_limit = 0.5
+            orl_limit = 0.3
+
+        # HOD/LOD Hard Filter
+        if signal.get("direction") == "bullish" and features.get("dist_to_hod_atr", 999) < hod_limit:
             return None
-        if signal.get("direction") == "bearish" and features.get("dist_to_lod_atr", 999) < 0.5:
+        if signal.get("direction") == "bearish" and features.get("dist_to_lod_atr", 999) < lod_limit:
             return None
 
-        # --- Prior Day H/L Hard Filter (Al Brooks: don't buy at PDH or sell at PDL) ---
-        if signal.get("direction") == "bullish" and features.get("dist_to_pdh_atr", 999) < 0.5:
+        # Prior Day H/L Hard Filter
+        if signal.get("direction") == "bullish" and features.get("dist_to_pdh_atr", 999) < pdh_limit:
             return None
-        if signal.get("direction") == "bearish" and features.get("dist_to_pdl_atr", 999) < 0.5:
+        if signal.get("direction") == "bearish" and features.get("dist_to_pdl_atr", 999) < pdl_limit:
             return None
 
-        # --- Opening Range Hard Filter (Al Brooks: ORH/ORL act as S/R) ---
-        if signal.get("direction") == "bullish" and features.get("dist_to_orh_atr", 999) < 0.3:
+        # Opening Range Hard Filter
+        if signal.get("direction") == "bullish" and features.get("dist_to_orh_atr", 999) < orh_limit:
             return None
-        if signal.get("direction") == "bearish" and features.get("dist_to_orl_atr", 999) < 0.3:
+        if signal.get("direction") == "bearish" and features.get("dist_to_orl_atr", 999) < orl_limit:
             return None
 
         # --- Extra ML features from signal metadata ---
         features["micro_double"] = 1.0 if signal.get("micro_double") else 0.0
         features["is_third_entry"] = 1.0 if signal.get("type") == "third_entry" else 0.0
 
-        return features, atr
+        # Pass suboptimal tag if it was close to resistance but allowed by trend
+        # This will command main engine to reduce risk position sizing.
+        is_suboptimal = False
+        if signal.get("direction") == "bullish":
+            if min(features.get("dist_to_hod_atr", 999), features.get("dist_to_pdh_atr", 999)) < 0.5:
+                is_suboptimal = True
+        else:
+            if min(features.get("dist_to_lod_atr", 999), features.get("dist_to_pdl_atr", 999)) < 0.5:
+                is_suboptimal = True
+
+        return features, atr, is_suboptimal, env

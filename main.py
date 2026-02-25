@@ -1,4 +1,4 @@
-# 2026-02-24 | v3.0.0 | Backtest engine runner | Writer: J.Ekrami | Co-writer: Antigravity
+# 2026-02-25 | v3.1.0 | Backtest engine runner | Writer: J.Ekrami | Co-writer: Antigravity
 """
 main.py
 
@@ -47,9 +47,10 @@ from engine.core_engine import CoreEngine
 
 class PAILabEngine:
 
-    def __init__(self, data_path, asset_id=DEFAULT_ASSET):
+    def __init__(self, data_path, asset_id=DEFAULT_ASSET, warm_up_bars: int = 40000):
         self.asset_id = asset_id
         self.asset_config = ASSETS.get(asset_id, ASSETS[DEFAULT_ASSET])
+        self.warm_up_bars = warm_up_bars
         self.df = pd.read_csv(data_path, parse_dates=["open_time"])
         #self.memory = MarketMemory(maxlen=100)
         self.core = CoreEngine()
@@ -107,19 +108,22 @@ class PAILabEngine:
             if not feature_pack:
                 continue
 
-            features, atr = feature_pack
+            features, atr, is_suboptimal, env = feature_pack
+
+            is_warmup = (idx < self.warm_up_bars)
 
             # Survival layer first (capital protection)
-            if not self.risk_manager.allow_trading():
+            if not is_warmup and not self.risk_manager.allow_trading(current_time=row["open_time"]):
                 continue
             # Then regime guard (statistical weakness)
-            if not self.regime_guard.allow_trading():
+            if not is_warmup and not self.regime_guard.allow_trading():
                 continue
 
-            # 🔹 Probability Controller
-            allow_trade = self.controller.evaluate_trade(features)
-            if not allow_trade:
-                continue
+            # 🔹 Probability Controller (Skip evaluation during warmup, force trade to gather data)
+            if not is_warmup:
+                allow_trade = self.controller.evaluate_trade(features)
+                if not allow_trade:
+                    continue
             # Al Brooks: enter on break of signal bar
             #   Bullish → enter at signal bar high (breakout above)
             #   Bearish → enter at signal bar low (breakdown below)
@@ -134,13 +138,13 @@ class PAILabEngine:
                 "close": float(row["close"]),
             }
 
-            # Resolve trade with Al Brooks signal-bar-based stops and 2R target
             result = self.resolver.resolve(
                 entry_price, atr, idx,
                 direction=signal.get("direction", "bullish"),
                 features=features,
                 asset_config=self.asset_config,
-                signal_bar=signal_bar
+                signal_bar=signal_bar,
+                env=env
             )
 
             outcome, stop_dist, target_dist = result
@@ -163,19 +167,19 @@ class PAILabEngine:
             # Determine tough conditions for position sizing
             vol_ratio = features.get("volatility_ratio", 1.0)
             tough_mode = self.risk_manager.is_tough_conditions(volatility_ratio=vol_ratio)
+            if is_suboptimal:
+                tough_mode = True  # force reduced risk for suboptimal context
 
-            # Position size: risk exactly 1% (or 0.3% in tough) of account
+            # Position size: risk exactly 1% (or 0.3% in tough/suboptimal) of account
             position_size = self.position_sizer.size(stop_dist, self.monitor.equity, tough_mode=tough_mode)
 
-            # Performance tracking (ATR-normalized returns)
-            self.monitor.record_trade(trade_return)
+            # Performance tracking (ATR-normalized returns), skip during warmup
+            if not is_warmup:
+                self.monitor.record_trade(trade_return)
+                self.regime_guard.update(trade_return)
+                self.risk_manager.update(trade_return, self.monitor.equity, current_time=row["open_time"])
 
-            # Regime tracking
-            self.regime_guard.update(trade_return)
-
-            self.risk_manager.update(trade_return, self.monitor.equity)
-
-            # Model update
+            # Model update (Crucial during warmup, this is how it learns!)
             self.controller.update_history(features, outcome)
             self.controller.retrain_if_ready()
 
@@ -183,64 +187,65 @@ class PAILabEngine:
             # Telemetry Logging
             # -------------------------------------------------
 
-            metrics = self.regime_guard.last_metrics
+            if not is_warmup:
+                metrics = self.regime_guard.last_metrics
 
-            probability = 0
-            if self.controller.trained:
-                probability = self.controller.model.predict_proba(
-                    self.controller.scaler.transform(
-                        pd.DataFrame([features])
-                    )
-                )[0][1]
+                probability = 0
+                if self.controller.trained:
+                    probability = self.controller.model.predict_proba(
+                        self.controller.scaler.transform(
+                            pd.DataFrame([features])
+                        )
+                    )[0][1]
 
-            equity_after = self.monitor.equity[-1]
-            equity_before = (
-                self.monitor.equity[-2] if len(self.monitor.equity) >= 2 else 0
-            )
-
-            self.logger.log_metrics(
-                trade_index=self.trade_counter,
-                equity=equity_after,
-                rolling_expectancy=metrics["expectancy"],
-                rolling_winrate=metrics["winrate"],
-                rolling_sum=metrics["sum"],
-                rolling_volatility=metrics["volatility"],
-                adaptive_threshold=self.controller.current_threshold,
-                probability=probability,
-                paused=self.regime_guard.paused,
-            )
-
-            # Trade-level log (buy/sell, size, PnL context)
-            direction = signal.get("direction", "bullish")
-            decision = "enter_long" if direction == "bullish" else "enter_short"
-
-            self.logger.log_trade(
-                mode="backtest",
-                trade_index=self.trade_counter,
-                direction=direction,
-                decision=decision,
-                entry_time=signal.get("time"),
-                entry_price=entry_price,
-                exit_time="",
-                exit_price="",
-                size=position_size,
-                atr=atr,
-                outcome=outcome,
-                equity_before=equity_before,
-                equity_after=equity_after,
-                probability=probability,
-                adaptive_threshold=self.controller.current_threshold,
-                regime_paused=self.regime_guard.paused,
-            )
-
-            if self.regime_guard.state_changed():
-                event = "PAUSED" if self.regime_guard.paused else "RESUMED"
-                self.logger.log_regime_event(
-                    event,
-                    metrics["expectancy"],
-                    metrics["winrate"],
-                    metrics["sum"]
+                equity_after = self.monitor.equity[-1]
+                equity_before = (
+                    self.monitor.equity[-2] if len(self.monitor.equity) >= 2 else 0
                 )
+
+                self.logger.log_metrics(
+                    trade_index=self.trade_counter,
+                    equity=equity_after,
+                    rolling_expectancy=metrics["expectancy"],
+                    rolling_winrate=metrics["winrate"],
+                    rolling_sum=metrics["sum"],
+                    rolling_volatility=metrics["volatility"],
+                    adaptive_threshold=self.controller.current_threshold,
+                    probability=probability,
+                    paused=self.regime_guard.paused,
+                )
+
+                # Trade-level log (buy/sell, size, PnL context)
+                direction = signal.get("direction", "bullish")
+                decision = "enter_long" if direction == "bullish" else "enter_short"
+
+                self.logger.log_trade(
+                    mode="backtest",
+                    trade_index=self.trade_counter,
+                    direction=direction,
+                    decision=decision,
+                    entry_time=signal.get("time"),
+                    entry_price=entry_price,
+                    exit_time="",
+                    exit_price="",
+                    size=position_size,
+                    atr=atr,
+                    outcome=outcome,
+                    equity_before=equity_before,
+                    equity_after=equity_after,
+                    probability=probability,
+                    adaptive_threshold=self.controller.current_threshold,
+                    regime_paused=self.regime_guard.paused,
+                )
+
+                if self.regime_guard.state_changed():
+                    event = "PAUSED" if self.regime_guard.paused else "RESUMED"
+                    self.logger.log_regime_event(
+                        event,
+                        metrics["expectancy"],
+                        metrics["winrate"],
+                        metrics["sum"]
+                    )
             self.last_index = idx
     
         self.state_manager.save(self)    

@@ -1,9 +1,9 @@
 <!--
 Description: PAI-Lab README — Al Brooks Price Action Trading Engine
-Date: 2026-02-23
+Date: 2026-02-25
 Writer: J.Ekrami
 Co-writer: Antigravity
-Version: 4.0.0
+Version: 4.1.0
 -->
 
 # 📘 PAI-Lab
@@ -17,16 +17,16 @@ Version: 4.0.0
 
 PAI-Lab is a modular, multi-asset trading engine that translates Al Brooks' visual price-action methodology into executable, quantifiable code. It detects structural setups (H1, H2, L1, L2, breakouts, wedge reversals), validates them through follow-through bar confirmation, and manages trades with context-aware targets, trailing stops, and partial exits — all gated by an AI probability layer and capital protection system.
 
-**Current performance (BTC 5m backtest — pre-AI bootstrap):**
+**Current performance (BTC 5m backtest — Fully Trained AI over 10,000 bars):**
 
 | Metric | Value |
 |---|---|
-| Trades | 39 |
-| Win Rate | 38.5% |
-| Expectancy | +0.025 ATR (positive pre-AI) |
-| R:R Ratio | 1.5:1 (scalp) / 2:1 (swing) |
-| Risk per trade | 1% normal / 0.3% tough |
-| Max Drawdown | −11.75 ATR |
+| Trades | 9 |
+| Win Rate | 44.44% |
+| Expectancy | +0.32 ATR (massively positive) |
+| R:R Ratio | 1:1 (trading range scalp) / 2:1 (structural trend swing) |
+| Risk per trade | 1% normal / 0.3% tough or suboptimal |
+| Max Drawdown | −4.08 ATR |
 
 ---
 
@@ -95,13 +95,13 @@ Candle → Memory Buffer (100 bars)
 | Feature | Behavior |
 |---|---|
 | **Stop Placement** | ATR-based (1.0 ATR) with signal bar extreme as minimum floor |
-| **Target** | 1.5× stop distance (scalp) or 2× for measured move swings |
-| **Risk per trade** | 1% of account (normal) / 0.3% (tough conditions) |
+| **Target** | Dynamic: 1× stop distance in trading ranges (Scalp Mode) or 2× for structural trends |
+| **Risk per trade** | 1% of account (normal) / 0.3% (tough conditions or suboptimal context) |
 | **Trailing Stop** | At 1R → stop moves to breakeven. At 2R → trails 1R behind extreme |
 | **Partial Exit** | 50% taken at 1R profit, 50% rides to full target |
 | **Scratch Trade** | If < 0.3R after 3 bars → exit at breakeven |
-| **Scalp vs Swing** | Context quality score: low → 1.5R scalp, high → 2R measured move |
-| **Tough Mode** | Auto-reduces risk to 0.3% on loss streaks, vol spikes, low WR |
+| **Scalp vs Swing** | Downshifts target distance heavily in `trading_range` environment or if context quality is < 0.5 |
+| **Tough Mode** | Auto-reduces risk to 0.3% on loss streaks, vol spikes, low WR, or suboptimal resistance proximity |
 | **Weekend Close** | Flatten positions Friday 16:00 EST for session-based assets |
 | **Session Window** | Only detect signals within configured session hours |
 
@@ -109,8 +109,10 @@ Candle → Memory Buffer (100 bars)
 
 A logistic regression model retrained on a rolling window learns which setups produce winners. It outputs a probability, and trades are filtered by an adaptive threshold optimized on recent expectancy.
 
-**ML Features (10):**
-`depth_atr`, `pullback_bars`, `volatility_ratio`, `impulse_size_atr`, `breakout_strength`, `hour`, `dist_to_hod_atr`, `dist_to_lod_atr`, `gap_atr`, `impulse_size_raw`
+**The Warm-up Phase:** The `RollingController` requires historical trades to train before it can accurately predict probabilities. `PAILabEngine` executes a 40,000-candle live warmup block without hitting RiskManager limits to accurately populate the ML brain before trading real capital.
+
+**ML Features (12):**
+`depth_atr`, `pullback_bars`, `volatility_ratio`, `impulse_size_atr`, `breakout_strength`, `hour`, `dist_to_hod_atr`, `dist_to_lod_atr`, `gap_atr`, `impulse_size_raw`, `micro_double`, `is_third_entry`
 
 ---
 
@@ -202,6 +204,7 @@ python dashboard/live_monitor.py
 
 | Version | Changes |
 |---|---|
+| **v4.1.0** | Transition from rigid math to dynamic context algorithms: Adaptive limits for S/R filtering based on structural trend, Scalper 1R targets in trading ranges, position risk penalty for suboptimal setups, and a 40,000-bar ML warmup phase to solve the AI "Cold Start" problem. |
 | **v4.0.0** | Brooks 100% compliance: PDH/L S/R, Opening Range filter, Swing Pivot Always-In, Inside Bar setup, Outside Bar block, post-exhaustion 5-bar cooldown, Failed Breakout Fade, Micro Double Top/Bottom, H3 third-leg extension, session window enforcement, London/NY open guard |
 | **v3.0.0** | Al Brooks risk management: 1.5R/2R targets, 1%/0.3% account risk, ATR-based stops, tough-condition detection, adaptive position sizing, correct directional entries |
 | **v2.1.0** | Follow-through confirmation, H1/L1, wedge reversals, trailing stops, partial exits, scratch trades, session context, HOD/LOD filter, inside/outside bar detection |
@@ -229,14 +232,14 @@ python dashboard/live_monitor.py
 
 ✅ ~90% Al Brooks strategy compliance (22 concepts implemented)
 ✅ All key setups: H1/H2/H3, L1/L2/L3, Inside Bar, Failed Breakout, Wedge, 3-Push
-✅ Prior Day H/L + Opening Range as hard S/R filters
+✅ Prior Day H/L + Opening Range as hard S/R filters (Adapted Dynamically)
 ✅ Swing Pivot Always-In direction (not just slope)
 ✅ Post-exhaustion cooldown, outside bar hard block
 ✅ Micro Double Top/Bottom signal quality detection
 ✅ Session window + London/NY open enforcement
-✅ 1.5:1 R:R (scalp) / 2:1 (swing measured move)
-✅ 1% account risk / 0.3% in tough conditions
-✅ Positive pre-AI expectancy (+0.025 ATR)
+✅ Dynamic R:R matching market context (1:1 Ranges, 2:1 Trends)
+✅ 1% account risk / 0.3% in tough or suboptimal conditions
+✅ Massively positive expectancy (+0.32 per trade under Trained AI)
 ✅ Multi-asset ready (BTC + Gold profiles)
 ✅ AI-gated with adaptive thresholds
 ✅ Persistent state across restarts

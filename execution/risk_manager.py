@@ -1,6 +1,6 @@
-# 2026-02-24 | v1.0.0 | Risk manager | Writer: J.Ekrami | Co-writer: Antigravity
+# 2026-02-25 | v1.1.0 | Risk manager | Writer: J.Ekrami | Co-writer: Antigravity
 import numpy as np
-import time
+from datetime import datetime, timedelta
 
 
 class RiskManager:
@@ -27,16 +27,16 @@ class RiskManager:
         self.hard_stop_time = None
 
         # Daily reset tracking
-        self._session_start = time.time()
-        self._session_duration = 24 * 3600  # 24 hours
+        self._session_start = None
+        self._session_duration = timedelta(days=1)
 
     # -------------------------------------------------
     # Update after trade
     # -------------------------------------------------
 
-    def update(self, trade_return, equity_series):
+    def update(self, trade_return, equity_series, current_time=None):
 
-        self._check_session_reset()
+        self._check_session_reset(current_time)
 
         self.daily_returns.append(trade_return)
         self.total_equity = equity_series
@@ -47,23 +47,29 @@ class RiskManager:
         else:
             self.current_loss_streak = 0
 
-        self._evaluate()
+        self._evaluate(current_time)
 
     # -------------------------------------------------
     # Reset daily counters each session
     # -------------------------------------------------
 
-    def _check_session_reset(self):
-        now = time.time()
-        if now - self._session_start >= self._session_duration:
+    def _check_session_reset(self, current_time):
+        if current_time is None:
+            return
+            
+        if self._session_start is None:
+            self._session_start = current_time
+            return
+            
+        if current_time - self._session_start >= self._session_duration:
             self.daily_returns = []
-            self._session_start = now
+            self._session_start = current_time
 
     # -------------------------------------------------
     # Evaluate capital risk
     # -------------------------------------------------
 
-    def _evaluate(self):
+    def _evaluate(self, current_time=None):
 
         if not self.total_equity:
             return
@@ -73,15 +79,15 @@ class RiskManager:
         # Hard stop conditions
         if total_drawdown <= self.max_total_drawdown:
             self.hard_stop_triggered = True
-            self.hard_stop_time = time.time()
+            self.hard_stop_time = current_time
 
         if sum(self.daily_returns) <= self.max_daily_loss:
             self.hard_stop_triggered = True
-            self.hard_stop_time = time.time()
+            self.hard_stop_time = current_time
 
         if self.current_loss_streak >= self.max_loss_streak:
             self.hard_stop_triggered = True
-            self.hard_stop_time = time.time()
+            self.hard_stop_time = current_time
 
     # -------------------------------------------------
     # Volatility protection
@@ -107,20 +113,23 @@ class RiskManager:
     # Allow trading? (with cooldown recovery)
     # -------------------------------------------------
 
-    def allow_trading(self):
+    def allow_trading(self, current_time=None):
         if not self.hard_stop_triggered:
             return True
 
+        if current_time is None:
+            return False
+
         # Allow recovery after cooldown (except total drawdown)
         if self.hard_stop_time is not None:
-            elapsed = time.time() - self.hard_stop_time
+            elapsed = (current_time - self.hard_stop_time).total_seconds()
             if elapsed >= self.cooldown_seconds:
                 # Only recover from streak/daily stops, not total drawdown
                 if self.total_equity and min(self.total_equity) > self.max_total_drawdown:
                     self.hard_stop_triggered = False
                     self.current_loss_streak = 0
                     self.daily_returns = []
-                    self._session_start = time.time()
+                    self._session_start = current_time
                     print("[RiskManager] Cooldown elapsed. Trading resumed.")
                     return True
 
