@@ -48,7 +48,9 @@ class SessionContext:
             self._day_low = candle["low"]
             self.first_hour_high = candle["high"]
             self.first_hour_low = candle["low"]
-            self._first_hour_end = dt_est.replace(hour=dt_est.hour + 1, minute=0, second=0)
+            from datetime import timedelta
+            _next_hour = (dt_est + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+            self._first_hour_end = _next_hour
 
             self.prior_day_high = self._prev_day_high
             self.prior_day_low = self._prev_day_low
