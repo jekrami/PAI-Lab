@@ -3,7 +3,7 @@ Description: PAI-Lab README — Al Brooks Price Action Trading Engine
 Date: 2026-02-25
 Writer: J.Ekrami
 Co-writer: Antigravity
-Version: 4.1.0
+Version: 5.0.0
 -->
 
 # 📘 PAI-Lab
@@ -17,99 +17,210 @@ Version: 4.1.0
 
 PAI-Lab is a modular, multi-asset trading engine that translates Al Brooks' visual price-action methodology into executable, quantifiable code. It detects structural setups (H1, H2, L1, L2, breakouts, wedge reversals), validates them through follow-through bar confirmation, and manages trades with context-aware targets, trailing stops, and partial exits — all gated by an AI probability layer and capital protection system.
 
-**Current performance (BTC 5m backtest — Fully Trained AI over 10,000 bars):**
+**Current performance (BTC 5m backtest — v5.0 Trained AI):**
 
 | Metric | Value |
 |---|---|
-| Trades | 9 |
-| Win Rate | 44.44% |
-| Expectancy | +0.32 ATR (massively positive) |
-| R:R Ratio | 1:1 (trading range scalp) / 2:1 (structural trend swing) |
-| Risk per trade | 1% normal / 0.3% tough or suboptimal |
-| Max Drawdown | −4.08 ATR |
+| Win Rate | 50.0% |
+| Expectancy | +0.30 ATR per trade |
+| R:R | 1R (range scalp) → 2R (trend swing), scaled continuously by regime probability |
+| Risk per trade | 1% normal / 0.3% in tough / shock conditions |
+| Max Drawdown | −1.0 ATR (v5.0 hard-block filters prevent wide-stop losses) |
 
 ---
 
-## How It Works
+## What's New in v5.0
 
-### 1. Signal Detection Pipeline
+### 1. Pressure Scoring Engine *(replaces 3 binary bar filters)*
 
-Every 5-minute candle passes through this pipeline:
+Binary checks (`body_ratio > 0.4`, `close_pos > 0.65`, `body > 1.2×avg`) are gone. A 5-point composite **Pressure Score** must reach ≥ 3 for a bar to qualify as a signal bar:
+
+| Component | Condition | Points |
+|---|---|---|
+| Extreme close position | `close_pos > 0.70` or `< 0.30` | +1 |
+| Consecutive directional closes | ≥ 2 bars in same direction | +1 |
+| Range expansion | Current bar range > 10-bar average | +1 |
+| Low overlap with prior bar | Overlap ratio < 30% of range | +1 |
+| Dominant tail rejection | Opposite-side tail > 30% of body | +1 |
+
+This produces fewer, higher-conviction signals — exactly what Al Brooks means by "don't trade weak signal bars."
+
+### 2. Volatility Shock Compression
+
+| Condition | Action |
+|---|---|
+| `signal_bar_range > 2.0 × ATR` | **Trade blocked** — market is in shock, stop is uncontrollable |
+| `signal_bar_range > 1.5 × ATR` | `risk = 0.3%`, target downshifted to Scalp Mode |
+| `ATR_current > 2.0 × ATR_lookback_mean` | `risk = 0.3%` automatically |
+
+### 3. Breakout State Machine *(was disconnected; now live)*
+
+`BreakoutDetector` was detected but never piped into the main trading flow. v5.0 activates a full state machine:
+
+```
+breakout_detected AND pressure_score >= 3
+    → breakout_state = ACTIVE
+    → Next: pullback bar close in breakout direction → Breakout Pullback Entry
+    → Next: bar reverses the close below breakout bar → Failed Breakout Entry
+    → Timeout after 10 bars → state cleared
+```
+
+### 4. Major Trend Reversal (MTR) Protocol
+
+A two-stage state machine blocks counter-trend entries until the reversal is structurally qualified:
+
+```
+Structural bias = "bullish" AND close < prior 20-bar low
+    → mtr_state = TEST_EXTREME
+
+mtr_state = TEST_EXTREME AND bar fails to make a new low
+    → mtr_state = REVERSAL_ATTEMPT   ← counter-trend trades now allowed
+
+Wedges, H2/L2 counter-trend, all gated on REVERSAL_ATTEMPT
+```
+
+### 5. Stop Efficiency Filter *(removed artificial stop cap)*
+
+The old code silently moved the stop closer to entry if `stop_dist > 1.5 ATR`. This created fake R:R ratios. v5.0 removes the cap entirely:
+
+- If `stop_dist > 1.5 × ATR` → **trade blocked** (the signal bar was too large)
+- If `expected_rr < 1.0` → **trade blocked** (the math doesn't work)
+
+> Al Brooks: *"Never move your stop to make the trade work. If the stop is too wide, don't take the trade."*
+
+### 6. Equity Curve Risk Compression
+
+| Trigger | Action |
+|---|---|
+| `loss_streak >= 3` | Risk → 0.3% |
+| `drawdown >= 5%` from equity peak | Risk → 0.3% |
+| `ATR_current > 2× ATR_lookback` | Risk → 0.3% |
+| New equity high confirmed | `restore_risk()` — full risk restored |
+
+### 7. Regime Probability Score *(replaces binary `env` string)*
+
+Instead of: `if env == "trading_range": target = 1R else: target = 2R`
+
+Now: `regime_probability` is a continuous float (0 = pure range, 1 = pure trend):
+
+```
+trend_score   = pressure_score + structure_score (HH/LL breaks)
+range_score   = overlap_score + failed_breakout_score
+regime_probability = trend_score / (trend_score + range_score)
+
+target_distance = stop_dist × (1.0 + regime_probability × 1.0)
+```
+
+At `regime_probability = 0.5` → target = 1.5R. At `1.0` → 2R. At `0.0` → 1R.
+Position size scales the same way — no cliff-edge behavior.
+
+### 8. Pattern Failure Memory
+
+The AI tracks win/loss history **per pattern type** (`h2`, `l2`, `wedge_reversal`, `breakout`, etc.):
+
+- After **2 consecutive losses** on a pattern → confidence halved to 0.5×
+- The AI probability is multiplied by the pattern confidence before threshold check
+- Confidence slowly recovers (+10% per win) up to 100%
+
+This automatically suppresses patterns that are performing poorly in the current market regime.
+
+---
+
+## Signal Detection Pipeline (v5.0)
 
 ```
 Candle → Memory Buffer (100 bars)
          ↓
-     TrendAnalyzer          → bull/bear/neutral bias
-     PriceActionAnalyzer    → bar type, tails, overlap, climactic, inside/outside
-     MarketEnvironmentClassifier → structural bull/bear/TTR/trading range
+     TrendAnalyzer + PriceActionAnalyzer + MarketEnvironmentClassifier
          ↓
-     [Block if TTR or climactic exhaustion]
+     [Block if TTR]
          ↓
-     SecondEntryDetector    → H2/L2 explicit two-legged pullback
-     FirstEntryDetector     → H1/L1 single-leg (strong trends only, sequence ≥ 3)
-     WedgeDetector          → 3-push reversal with decreasing momentum
-     BreakoutDetector       → breakout above/below recent range
+     ► Pressure Score (NEW) — must be ≥ 3 to proceed
          ↓
-     [Pending Signal → wait for Follow-Through Bar]
+     ► Regime Probability Score (NEW) — 0–1 float, drives targets + sizing
          ↓
-     Feature Extraction     → 10+ ML features
+     ► Volatility Shock Check (NEW) — hard block or force scalp
          ↓
-     HOD/LOD Hard Filter    → block buys at session high, sells at session low
+     ► MTR State Machine (NEW) — gates counter-trend entries
          ↓
-     AI Probability Gate    → logistic regression with adaptive threshold
+     MTR / Climactic Cooldown / Outside Bar Block
          ↓
-     Regime & Risk Guards   → statistical and capital protection
+     ► Breakout State Machine (NEW) — pullback + failure entries
+         ↓
+     SecondEntryDetector (H2/L2) → MTR Gate
+     FirstEntryDetector  (H1/L1)
+     WedgeDetector       → MTR Gate
+     InsideBarDetector
+         ↓
+     [Pending Signal → Follow-Through Bar Confirmation]
+         ↓
+     Feature Extraction + Dynamic S/R Filters (HOD/LOD/PDH/PDL/Opening Range)
+         ↓
+     AI Probability Gate × Pattern Confidence (NEW)
+         ↓
+     Regime Guard + Risk Manager + Stop Efficiency Check (NEW)
          ↓
      Trade Execution
 ```
 
-### 2. Al Brooks Concepts Implemented
+---
+
+## Al Brooks Concepts Implemented
 
 | Concept | Implementation |
 |---|---|
-| **H2/L2 (Second Entry)** | Explicit two-legged pullback detector walks backward through Leg 2 → Bounce → Leg 1 → Impulse |
-| **H3 (Third Entry)** | Extends H2 state machine to detect a third pullback leg in strong channel trends |
-| **H1/L1 (First Entry)** | Single-leg pullback, only in very strong trends (3+ consecutive strong bars) |
-| **Wedge / 3-Push Reversal** | Detects 3 pushes to new extremes with decreasing momentum, enters counter-trend |
-| **Inside Bar Setup** | Detects inside bar after a strong trend bar; entry on break of the mother bar |
-| **Failed Breakout Fade** | Detects a breakout that reverses on the very next bar and fades the trapped buyers/sellers |
-| **Micro Double Top/Bottom** | Two bars testing the same extreme within 0.15 ATR; quality boost for H2/L2 signal bars |
-| **Follow-Through Confirmation** | Signal bars are stored as "pending" — only confirmed if the next bar closes in the signal direction |
-| **Signal Bar Quality** | Close position > 0.65 (bull) / < 0.35 (bear), body ratio > 0.4 |
-| **Tail Analysis** | Upper/lower tail ratios expose signal weakness |
-| **Climactic Exhaustion** | 3+ strong bars with expanding range suppress signals + 5-bar cooldown period |
+| **H2/L2 (Second Entry)** | Explicit two-legged pullback detector |
+| **H3 (Third Entry)** | Third pullback leg in channel trends |
+| **H1/L1 (First Entry)** | Single-leg pullback (strong trends only) |
+| **Wedge / 3-Push Reversal** | 3 pushes with decreasing momentum → MTR gated |
+| **Inside Bar Setup** | Entry on break of mother bar |
+| **Failed Breakout Fade** | Reversal on next bar after breakout |
+| **Breakout Pullback Entry** *(v5.0)* | Pullback entry after confirmed breakout |
+| **Micro Double Top/Bottom** | Two bars testing same extreme within 0.15 ATR |
+| **Follow-Through Confirmation** | Pending signal cleared only on confirming bar |
+| **Pressure Scoring** *(v5.0)* | 5-point composite replaces binary bar checks |
+| **Climactic Exhaustion** | 3+ strong expanding bars → 5-bar cooldown |
 | **Tight Trading Range** | 5+ overlapping doji bars block all signals |
-| **Structural Trend** | Half-over-half high/low progression confirms bull/bear structure |
-| **Always-In via Swing Pivots** | Primary trend bias from swing pivot HH/HL or LL/LH progression, not slope |
-| **Measured Move Targets** | Target = distance of prior impulse leg |
-| **Prior Day H/L Filter** | Suppress buys within 0.5 ATR of prior day high; sells within 0.5 ATR of prior day low |
-| **HOD/LOD Proximity Filter** | Suppress buys within 0.5 ATR of session high and sells near session low |
-| **Opening Range Filter** | Suppress signals within 0.3 ATR of the first-hour high/low |
-| **Outside Bar Block** | Blocks new setup generation on any outside bar (Al Brooks: creates confusion) |
-| **Inside/Outside Bar** | Detected and used as standalone setups or hard guards |
-| **Session Enforcement** | Filters trades outside configured session window (Gold: 08:00-17:00 EST) |
-| **London/NY Open Guard** | Suppresses first 2 bars of every new session to avoid opening-bar traps |
+| **Structural Trend** | Half-over-half HH/HL progression |
+| **Always-In via Swing Pivots** | HH/HL or LL/LH progression (not slope) |
+| **MTR Protocol** *(v5.0)* | Two-stage state machine for trend reversals |
+| **Measured Move Targets** | Target = prior impulse distance |
+| **Regime Probability Score** *(v5.0)* | Continuous 0–1 trend/range probability |
+| **Prior Day H/L Filter** | Dynamic — strict in ranges, relaxed in trends |
+| **HOD/LOD Proximity Filter** | Dynamic — adapts to structural trend strength |
+| **Opening Range Filter** | Dynamic — strict in ranges, relaxed in trends |
+| **Stop Efficiency Filter** *(v5.0)* | Block if stop > 1.5 ATR or RR < 1.0 |
+| **Volatility Shock Compression** *(v5.0)* | Hard block or scalp mode on spike bars |
+| **Outside Bar Block** | Block setup generation on outside bars |
+| **Session Enforcement** | Trade only in configured session window |
+| **London/NY Open Guard** | Suppress first 2 bars of every session |
 
-### 3. Trade Management (Live Mode)
+---
+
+## Trade Management
 
 | Feature | Behavior |
 |---|---|
-| **Stop Placement** | ATR-based (1.0 ATR) with signal bar extreme as minimum floor |
-| **Target** | Dynamic: 1× stop distance in trading ranges (Scalp Mode) or 2× for structural trends |
-| **Risk per trade** | 1% of account (normal) / 0.3% (tough conditions or suboptimal context) |
-| **Trailing Stop** | At 1R → stop moves to breakeven. At 2R → trails 1R behind extreme |
-| **Partial Exit** | 50% taken at 1R profit, 50% rides to full target |
+| **Stop Placement** | Signal bar extreme — never moved artificially |
+| **Stop Efficiency** *(v5.0)* | Block if native stop > 1.5 ATR |
+| **Target** | Continuous: 1R (range) → 2R (trend) via regime probability |
+| **Risk per trade** | 1% normal / 0.3% tough / shock / drawdown |
+| **Equity Curve Compression** *(v5.0)* | Risk drops at 5% drawdown, restores at equity high |
+| **Trailing Stop** | At 1R → breakeven. At 2R → trail 1R behind extreme |
+| **Partial Exit** | 50% at 1R, 50% rides to full target |
 | **Scratch Trade** | If < 0.3R after 3 bars → exit at breakeven |
-| **Scalp vs Swing** | Downshifts target distance heavily in `trading_range` environment or if context quality is < 0.5 |
-| **Tough Mode** | Auto-reduces risk to 0.3% on loss streaks, vol spikes, low WR, or suboptimal resistance proximity |
-| **Weekend Close** | Flatten positions Friday 16:00 EST for session-based assets |
-| **Session Window** | Only detect signals within configured session hours |
+| **Pattern Failure Memory** *(v5.0)* | Per-pattern confidence degrades after consecutive losses |
+| **Tough Mode** | 0.3% risk on loss streaks, vol spikes, drawdown, suboptimal proximity |
 
-### 4. AI Layer
+---
 
-A logistic regression model retrained on a rolling window learns which setups produce winners. It outputs a probability, and trades are filtered by an adaptive threshold optimized on recent expectancy.
+## AI Layer
 
-**The Warm-up Phase:** The `RollingController` requires historical trades to train before it can accurately predict probabilities. `PAILabEngine` executes a 40,000-candle live warmup block without hitting RiskManager limits to accurately populate the ML brain before trading real capital.
+A logistic regression model retrained on a rolling window learns which setups produce winners in the current market regime.
+
+**Warm-up Phase:** The `RollingController` requires historical trades to train. `PAILabEngine` runs a 40,000-candle live warmup block without enforcing RiskManager limits to accurately populate the AI brain before trading real capital.
+
+**Pattern Failure Memory (v5.0):** The AI now tracks outcomes per signal type. Patterns with consecutive losses have their probability output scaled down before threshold comparison.
 
 **ML Features (12):**
 `depth_atr`, `pullback_bars`, `volatility_ratio`, `impulse_size_atr`, `breakout_strength`, `hour`, `dist_to_hod_atr`, `dist_to_lod_atr`, `gap_atr`, `impulse_size_raw`, `micro_double`, `is_third_entry`
@@ -117,8 +228,6 @@ A logistic regression model retrained on a rolling window learns which setups pr
 ---
 
 ## Multi-Asset Support
-
-PAI-Lab is designed for multi-asset trading with per-asset configuration:
 
 ```python
 ASSETS = {
@@ -135,7 +244,7 @@ ASSETS = {
 }
 ```
 
-Each asset gets its own AI model state file (`state/engine_state_BTCUSDT.pkl`), ensuring models trained on BTC never contaminate Gold signals.
+Each asset gets its own AI model state file (`state/engine_state_BTCUSDT.pkl`).
 
 ---
 
@@ -153,17 +262,17 @@ PAI-Lab/
 │   ├── WedgeDetector            #   3-push reversal pattern
 │   ├── BreakoutDetector         #   Range breakout detection
 │   ├── MarketEnvironmentClassifier  #  TTR / structural trend
-│   └── VolatilityAnalyzer       #   ATR and volatility regime
+│   └── SwingPivotTracker        #   Always-In direction
 ├── engine/
-│   └── core_engine.py           # Signal pipeline + follow-through + HOD/LOD filter
+│   └── core_engine.py           # Signal pipeline + Pressure Score + Breakout SM + MTR (v5.0)
 ├── core/
-│   ├── feature_extractor.py     # 10 ML features
+│   ├── feature_extractor.py     # 12 ML features
 │   └── session_context.py       # Session open, first-hour range, prior day H/L
 ├── intelligence/
-│   └── rolling_controller.py    # Logistic regression + adaptive threshold
+│   └── rolling_controller.py    # Logistic regression + pattern failure memory (v5.0)
 ├── execution/
-│   ├── resolvers.py             # Backtest + Live resolvers (trailing, scaling, scratch)
-│   ├── risk_manager.py          # Drawdown, streak, volatility protection
+│   ├── resolvers.py             # Stop efficiency filter + regime probability targets (v5.0)
+│   ├── risk_manager.py          # Drawdown %, streak, vol shock, restore_risk (v5.0)
 │   ├── regime_guard.py          # Statistical edge decay detection
 │   ├── position_sizer.py        # Fixed-fraction volatility sizing
 │   ├── state_manager.py         # Per-asset state persistence
@@ -198,19 +307,23 @@ python dashboard/live_monitor.py
 # Access at http://localhost:7860
 ```
 
+### Roll Back to Stable
+```bash
+git checkout v4.1.0
+```
+
 ---
 
 ## Version History
 
 | Version | Changes |
 |---|---|
-| **v4.1.0** | Transition from rigid math to dynamic context algorithms: Adaptive limits for S/R filtering based on structural trend, Scalper 1R targets in trading ranges, position risk penalty for suboptimal setups, and a 40,000-bar ML warmup phase to solve the AI "Cold Start" problem. |
-| **v4.0.0** | Brooks 100% compliance: PDH/L S/R, Opening Range filter, Swing Pivot Always-In, Inside Bar setup, Outside Bar block, post-exhaustion 5-bar cooldown, Failed Breakout Fade, Micro Double Top/Bottom, H3 third-leg extension, session window enforcement, London/NY open guard |
-| **v3.0.0** | Al Brooks risk management: 1.5R/2R targets, 1%/0.3% account risk, ATR-based stops, tough-condition detection, adaptive position sizing, correct directional entries |
-| **v2.1.0** | Follow-through confirmation, H1/L1, wedge reversals, trailing stops, partial exits, scratch trades, session context, HOD/LOD filter, inside/outside bar detection |
-| **v2.0.0** | Asset profiles, TTR detection, explicit H2/L2 two-legged counting, measured move targets, session features, state segregation |
-| **v1.3.0** | Gradio monitoring dashboard, live BTC paper trading |
-| **v1.2.0** | Regime guard, risk manager, state persistence, position sizing |
+| **v5.0.0** | Capital security overhaul: Pressure Scoring Engine (5-point composite replaces 3 binary filters), Volatility Shock Compression (hard block + scalp force), Breakout State Machine activated, MTR Protocol (2-stage state machine gates counter-trend), Stop Efficiency Filter (hard block replaces artificial cap), Equity Curve Risk Compression (5% drawdown trigger + restore_risk), Regime Probability Score (continuous 0–1 float replaces binary env), Pattern Failure Memory (per-pattern confidence tracking) |
+| **v4.1.0** | Dynamic context algorithms: Adaptive S/R limits based on structural trend, 1R targets in ranges (Scalp Mode), position risk penalty for suboptimal setups, 40,000-bar ML warmup phase (Cold Start fix) |
+| **v4.0.0** | Brooks 100% compliance: PDH/L S/R, Opening Range filter, Swing Pivot Always-In, Inside Bar setup, Outside Bar block, Failed Breakout Fade, Micro Double Top/Bottom, H3 extension, session enforcement, London/NY open guard |
+| **v3.0.0** | Risk management: 1.5R/2R targets, 1%/0.3% account risk, ATR-based stops, tough-condition detection, adaptive position sizing |
+| **v2.1.0** | Follow-through confirmation, H1/L1, wedge reversals, trailing stops, partial exits, scratch trades |
+| **v2.0.0** | Asset profiles, TTR detection, explicit H2/L2 counting, measured move targets, state segregation |
 | **v1.0.0** | Core H2 detection, AI probability layer, backtest engine |
 
 ---
@@ -220,7 +333,9 @@ python dashboard/live_monitor.py
 - **No lookahead bias** — all signals are evaluated candle-by-candle
 - **No replay stacking** — state manager prevents duplicate processing
 - **Follow-through first** — never trade on the signal bar alone
-- **Context before mechanics** — structural environment must match the setup direction
+- **Pressure before setup** — signal bar must prove directional intent
+- **Context before mechanics** — structural environment must match setup direction
+- **Never fake the stop** — if the geometry doesn't work, skip the trade
 - **Capital survival** — risk management is independent of strategy logic
 - **Modular isolation** — every component has a single responsibility
 
@@ -228,21 +343,21 @@ python dashboard/live_monitor.py
 
 ## Status
 
-**PAI-Lab v4.0.0 — Al Brooks Full-Compliance Price Action Engine**
+**PAI-Lab v5.0.0 — Capital-Safe Al Brooks Price Action Engine**
 
-✅ ~90% Al Brooks strategy compliance (22 concepts implemented)
-✅ All key setups: H1/H2/H3, L1/L2/L3, Inside Bar, Failed Breakout, Wedge, 3-Push
-✅ Prior Day H/L + Opening Range as hard S/R filters (Adapted Dynamically)
-✅ Swing Pivot Always-In direction (not just slope)
-✅ Post-exhaustion cooldown, outside bar hard block
-✅ Micro Double Top/Bottom signal quality detection
-✅ Session window + London/NY open enforcement
-✅ Dynamic R:R matching market context (1:1 Ranges, 2:1 Trends)
-✅ 1% account risk / 0.3% in tough or suboptimal conditions
-✅ Massively positive expectancy (+0.32 per trade under Trained AI)
-✅ Multi-asset ready (BTC + Gold profiles)
-✅ AI-gated with adaptive thresholds
-✅ Persistent state across restarts
+✅ ~86% Al Brooks strategy compliance (37/43 core concepts implemented)
+✅ Pressure Scoring Engine — no more weak signal bars
+✅ Breakout State Machine — ACTIVE → Pullback/Failure paths
+✅ MTR Protocol — structured reversal confirmation required
+✅ Stop Efficiency Filter — no artificial stop manipulation
+✅ Equity Curve Risk Compression — 5% drawdown trigger
+✅ Regime Probability Score — continuous trend/range scaling
+✅ Pattern Failure Memory — per-pattern AI confidence
+✅ Volatility Shock Compression — ATR spike protection
+✅ Dynamic R:R scaling (1R ranges → 2R trends) via regime probability
+✅ 40,000-bar AI warm-up phase eliminates cold-start problem
+✅ Multi-asset ready (BTC + Gold)
+✅ Persistent state + Gradio dashboard
 
 ---
 
