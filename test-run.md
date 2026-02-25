@@ -25,7 +25,9 @@ screen -S pailab
 
 # Inside the screen, activate the environment and run the engine
 source .venv/bin/activate
-python live_runner.py
+
+# Running with tee will save console output to a log file but still show it on your screen
+python live_runner.py | tee -a output.log
 ```
 
 ### Screen Commands:
