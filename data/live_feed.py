@@ -19,7 +19,7 @@ class BinanceLiveFeed:
     def __init__(self, symbol="BTCUSDT", interval="5m"):
         self.symbol = symbol
         self.interval = interval
-        self.base_url = "https://api.binance.com/api/v3/klines"
+        self.base_url = "https://data-api.binance.vision/api/v3/klines"
 
     # -------------------------------------------------
     # Fetch last N historical closed candles

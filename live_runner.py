@@ -1,4 +1,4 @@
-# 2026-02-24 | v3.0.0 | Live paper trading runner | Writer: J.Ekrami | Co-writer: Antigravity
+# 2026-02-25 | v3.0.1 | Live paper trading runner | Writer: J.Ekrami | Co-writer: Antigravity
 """
 live_runner.py
 
@@ -183,7 +183,7 @@ while True:
         candle_time = candle.get("open_time") or candle.get("time")
         if candle_time is not None:
             if isinstance(candle_time, (int, float)):
-                dt_utc = datetime.utcfromtimestamp(candle_time / 1000)
+                dt_utc = datetime.fromtimestamp(candle_time / 1000, datetime.UTC)
             else:
                 dt_utc = candle_time
             if not _is_within_session(dt_utc, ASSET_CONFIG.get("session", "24/7")):

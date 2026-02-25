@@ -2,7 +2,8 @@ import requests
 import pandas as pd
 import time
 
-BASE_URL = "https://api.binance.com/api/v3/klines"
+#BASE_URL = "https://api.binance.com/api/v3/klines"
+BASE_URL = "https://data-api.binance.vision/api/v3/klines"
 SYMBOL = "BTCUSDT"
 INTERVAL = "5m"
 LIMIT = 1000  # max per request
