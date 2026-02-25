@@ -26,12 +26,14 @@ EST_OFFSET = timedelta(hours=-5)
 
 
 def compute_stop_target(entry_price, atr, direction, signal_bar,
-                        asset_config=None, features=None, context_quality=None, env=None):
+                        asset_config=None, features=None, context_quality=None,
+                        env=None, regime_probability=None):
     """
     Compute stop and target distances using Al Brooks' signal-bar-based placement.
 
     Returns:
-        (stop_price, target_price, stop_dist, target_dist)
+        (stop_price, target_price, stop_dist, target_dist)  OR  None if the
+        trade is structurally unacceptable (wide stop or poor R:R).
     """
     # Stop distance: ATR-based (proven reliable on BTC 5m)
     # Uses ATR_STOP as the primary stop distance, with the signal bar
@@ -47,18 +49,19 @@ def compute_stop_target(entry_price, atr, direction, signal_bar,
         stop_dist = max(atr_stop_dist, signal_bar_stop + STOP_BUFFER_ATR * atr)
         stop_price = entry_price + stop_dist
 
-    # Cap: stop must not exceed 1.5 ATR (keeps targets reachable)
+    # --- Stop Efficiency Filter (Al Brooks: Never fake the stop. If it's too wide, skip.) ---
+    # v5.0: Replaced the old artificial stop cap with a hard block.
+    # Moving the stop artificially creates a false sense of R:R. If the signal bar
+    # is too large, the trade simply does not meet risk criteria.
     if stop_dist > 1.5 * atr:
-        stop_dist = 1.5 * atr
-        if direction == "bullish":
-            stop_price = entry_price - stop_dist
-        else:
-            stop_price = entry_price + stop_dist
+        return None   # Stop too wide — trade blocked
 
-    # Target: dynamic based on environment
-    
-    # Baseline R:R
-    if env == "trading_range":
+    # Target: dynamic based on regime probability (0=range, 1=trend) or fallback env string
+    if regime_probability is not None:
+        # Smoothly scale between 1R (full range) and 2R (full trend)
+        target_mult = 1.0 + regime_probability * 1.0
+        target_dist = stop_dist * target_mult
+    elif env == "trading_range":
         # Al Brooks: Buy low, sell high, and scalp holding for 1R in a trading range
         target_dist = stop_dist * 1.0
     else:
@@ -78,6 +81,11 @@ def compute_stop_target(entry_price, atr, direction, signal_bar,
         scalp_target = stop_dist * 1.0
         target_dist = min(target_dist, scalp_target)
 
+    # --- R:R Efficiency Check ---
+    expected_rr = target_dist / stop_dist if stop_dist > 0 else 0
+    if expected_rr < 1.0:
+        return None   # R:R too poor — trade blocked
+
     if direction == "bullish":
         target_price = entry_price + target_dist
     else:
@@ -96,7 +104,8 @@ class BacktestResolver:
         self.df = df
 
     def resolve(self, entry_price, atr, idx, direction="bullish",
-                features=None, asset_config=None, signal_bar=None, env=None):
+                features=None, asset_config=None, signal_bar=None, env=None,
+                regime_probability=None):
         """
         Resolve trade outcome using Al Brooks 2R logic.
 
@@ -106,7 +115,7 @@ class BacktestResolver:
         
         Returns:
             (outcome, stop_dist, target_dist)
-                outcome: 1 = win, 0 = loss, None = unresolved
+                outcome: 1 = win, 0 = loss, None = unresolved or blocked
                 stop_dist / target_dist: actual distances used
         """
         # Build signal bar from dataframe if not provided
@@ -119,10 +128,15 @@ class BacktestResolver:
                 "close": row["close"],
             }
 
-        stop_price, target_price, stop_dist, target_dist = compute_stop_target(
+        result = compute_stop_target(
             entry_price, atr, direction, signal_bar,
-            asset_config=asset_config, features=features, env=env
+            asset_config=asset_config, features=features, env=env,
+            regime_probability=regime_probability
         )
+        if result is None:
+            return None, 0, 0   # stop too wide or R:R too poor
+
+        stop_price, target_price, stop_dist, target_dist = result
 
         for j in range(1, 31):
 
@@ -158,7 +172,8 @@ class LiveResolver:
         return self.position is not None
 
     def open_position(self, entry_price, atr, features, direction, size, entry_time,
-                      asset_config=None, context_quality=None, signal_bar=None, env=None):
+                      asset_config=None, context_quality=None, signal_bar=None, env=None,
+                      regime_probability=None):
 
         # Build a pseudo signal bar if not provided
         if signal_bar is None:
@@ -169,11 +184,16 @@ class LiveResolver:
                 "close": entry_price,
             }
 
-        stop_price, target_price, stop_dist, target_dist = compute_stop_target(
+        result = compute_stop_target(
             entry_price, atr, direction, signal_bar,
             asset_config=asset_config, features=features,
-            context_quality=context_quality, env=env
+            context_quality=context_quality, env=env,
+            regime_probability=regime_probability
         )
+        if result is None:
+            return False   # stop too wide or R:R too poor
+
+        stop_price, target_price, stop_dist, target_dist = result
 
         self.position = {
             "entry": entry_price,

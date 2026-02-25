@@ -85,9 +85,14 @@ class PAILabEngine:
 
         print("Starting live simulation...\n")
 
-        for idx in range(self.last_index, len(self.df)):
+        for idx, row_dict in enumerate(self.df.to_dict(orient="records")):
+            if idx < self.last_index: # Skip already processed rows if state was loaded
+                continue
 
-            row = self.df.iloc[idx]
+            row = pd.Series(row_dict) # Convert dict back to Series for consistent access
+
+            # Mark warmup mode on controller to suppress console print noise
+            self.controller._warmup_mode = (idx < self.warm_up_bars)
 
             candle = {
                 "time": row["open_time"],
@@ -110,6 +115,12 @@ class PAILabEngine:
 
             features, atr, is_suboptimal, env = feature_pack
 
+            # Read v5.0 signal metadata
+            regime_probability = signal.get("regime_probability", None)
+            force_scalp        = signal.get("force_scalp", False)
+            risk_override      = signal.get("risk_override", None)
+            pattern_type       = signal.get("type", None)
+
             is_warmup = (idx < self.warm_up_bars)
 
             # Survival layer first (capital protection)
@@ -121,7 +132,7 @@ class PAILabEngine:
 
             # 🔹 Probability Controller (Skip evaluation during warmup, force trade to gather data)
             if not is_warmup:
-                allow_trade = self.controller.evaluate_trade(features)
+                allow_trade = self.controller.evaluate_trade(features, signal_type=pattern_type)
                 if not allow_trade:
                     continue
             # Al Brooks: enter on break of signal bar
@@ -144,7 +155,8 @@ class PAILabEngine:
                 features=features,
                 asset_config=self.asset_config,
                 signal_bar=signal_bar,
-                env=env
+                env=env,
+                regime_probability=regime_probability
             )
 
             outcome, stop_dist, target_dist = result
@@ -166,21 +178,33 @@ class PAILabEngine:
 
             # Determine tough conditions for position sizing
             vol_ratio = features.get("volatility_ratio", 1.0)
-            tough_mode = self.risk_manager.is_tough_conditions(volatility_ratio=vol_ratio)
-            if is_suboptimal:
-                tough_mode = True  # force reduced risk for suboptimal context
+            # Pass ATR values for v5.0 volatility shock check
+            long_atr_mean = features.get("gap_atr", atr)  # proxy for lookback ATR
+            tough_mode = self.risk_manager.is_tough_conditions(
+                volatility_ratio=vol_ratio,
+                atr_current=atr,
+                atr_lookback_mean=long_atr_mean
+            )
+            if is_suboptimal or force_scalp:
+                tough_mode = True  # force reduced risk for suboptimal/volatility-shock context
 
-            # Position size: risk exactly 1% (or 0.3% in tough/suboptimal) of account
+            # If signal carries specific risk override (volatility shock), apply directly
             position_size = self.position_sizer.size(stop_dist, self.monitor.equity, tough_mode=tough_mode)
 
             # Performance tracking (ATR-normalized returns), skip during warmup
             if not is_warmup:
+                prev_equity_len = len(self.monitor.equity)
                 self.monitor.record_trade(trade_return)
                 self.regime_guard.update(trade_return)
                 self.risk_manager.update(trade_return, self.monitor.equity, current_time=row["open_time"])
 
+                # v5.0: Equity recovery restore
+                if len(self.monitor.equity) >= 2:
+                    if self.monitor.equity[-1] >= max(self.monitor.equity[:-1]):
+                        self.risk_manager.restore_risk()
+
             # Model update (Crucial during warmup, this is how it learns!)
-            self.controller.update_history(features, outcome)
+            self.controller.update_history(features, outcome, pattern_type=pattern_type)
             self.controller.retrain_if_ready()
 
             # -------------------------------------------------

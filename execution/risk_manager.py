@@ -1,4 +1,4 @@
-# 2026-02-25 | v1.1.0 | Risk manager | Writer: J.Ekrami | Co-writer: Antigravity
+# 2026-02-25 | v2.0.0 | Risk manager | Writer: J.Ekrami | Co-writer: Antigravity
 import numpy as np
 from datetime import datetime, timedelta
 
@@ -140,21 +140,27 @@ class RiskManager:
     # Al Brooks: reduce from 1% to 0.3% risk
     # -------------------------------------------------
 
-    def is_tough_conditions(self, volatility_ratio=None):
+    def is_tough_conditions(self, volatility_ratio=None, atr_current=None, atr_lookback_mean=None):
         """
         Returns True if conditions warrant reduced position sizing.
         This does NOT block trading — it only signals the position
         sizer to use RISK_FRACTION_TOUGH instead of RISK_FRACTION_NORMAL.
 
         Tough triggers:
-        - Loss streak >= threshold (default 3)
+        - Loss streak >= 3
         - Daily returns negative
         - Volatility spike (short ATR > 1.5× long ATR)
+        - Equity drawdown >= 5% from peak  (v5.0)
+        - ATR current > 2× ATR lookback mean (v5.0 volatility shock)
         """
         from config import TOUGH_CONDITION_RULES
 
         # Loss streak check
         if self.current_loss_streak >= TOUGH_CONDITION_RULES["loss_streak_threshold"]:
+            return True
+
+        # Explicit v5.0 streak threshold (belt + suspenders)
+        if self.current_loss_streak >= 3:
             return True
 
         # Daily performance check
@@ -166,5 +172,24 @@ class RiskManager:
             if volatility_ratio > TOUGH_CONDITION_RULES["volatility_spike_factor"]:
                 return True
 
+        # v5.0: Equity drawdown check (percentage-based from peak)
+        if self.total_equity and len(self.total_equity) >= 2:
+            peak = max(self.total_equity)
+            current = self.total_equity[-1]
+            if peak > 0 and (peak - current) / peak >= 0.05:
+                return True
+
+        # v5.0: ATR volatility shock (compare current ATR to rolling mean)
+        if atr_current is not None and atr_lookback_mean is not None:
+            if atr_lookback_mean > 0 and atr_current > 2.0 * atr_lookback_mean:
+                return True
+
         return False
 
+    def restore_risk(self):
+        """
+        Called when a new equity high is confirmed.
+        Resets loss streak so is_tough_conditions() returns False.
+        """
+        self.current_loss_streak = 0
+        self.daily_returns = []
