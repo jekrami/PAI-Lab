@@ -1,4 +1,4 @@
-# 2026-02-26 | Phase-1 v6 | Telemetry and trade logger | Writer: J.Ekrami | Co-writer: Antigravity
+# 2026-02-26 | Phase-2 v6 | Telemetry and trade logger | Writer: J.Ekrami | Co-writer: Antigravity
 import csv
 import os
 from datetime import datetime
@@ -55,9 +55,9 @@ class TelemetryLogger:
             ],
         )
 
-        # Phase-1 v6: Context decision log
+        # Phase-1/2 v6: Context decision log
         self._init_file(self.context_path,
-                        ["bar_time", "ai_bias", "ai_env", "ai_cont_prob",
+                        ["bar_time", "ai_bias", "ai_env", "ai_cont_prob", "ai_confidence",
                          "selected_strategy", "blocked_by_constraint",
                          "constraint_reason", "final_execution"])
 
@@ -149,17 +149,18 @@ class TelemetryLogger:
                     regime_paused,
                 ]
             )
-    def log_context(self, bar_time, ai_bias, ai_env, ai_cont_prob,
+    def log_context(self, bar_time, ai_bias, ai_env, ai_cont_prob, ai_confidence,
                     selected_strategy, blocked_by_constraint,
                     constraint_reason, final_execution):
-        """Phase-1 v6: Log per-bar AI context and execution decision."""
+        """Phase-2 v6: Log per-bar AI context, confidence, and execution decision."""
         with open(self.context_path, "a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
                 bar_time,
                 ai_bias,
                 ai_env,
-                round(ai_cont_prob, 4),
+                round(ai_cont_prob,  4),
+                round(ai_confidence, 4),
                 selected_strategy,
                 blocked_by_constraint,
                 constraint_reason or "",

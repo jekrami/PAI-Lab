@@ -1,5 +1,5 @@
-# 2026-02-26 | Phase-1 v6 | Walk-Forward Orchestration Controller | Writer: J.Ekrami | Co-writer: Antigravity
-# v6.0.0
+# 2026-02-26 | Phase-2 v6 | Walk-Forward Orchestration + Edge Gating | Writer: J.Ekrami | Co-writer: Antigravity
+# v6.1.0
 """
 RollingController is the training orchestration layer only.
 It does NOT contain the model — that lives in intelligence/ai_context_model.py.
@@ -13,7 +13,21 @@ Responsibilities:
 
 import numpy as np
 import pandas as pd
+from collections import deque
 from intelligence.ai_context_model import AIContextModel
+
+
+# ---------------------------------------------------------------------------
+# Phase-2 Constants
+# ---------------------------------------------------------------------------
+
+CONFIDENCE_GATE          = 0.60   # minimum AI model confidence to allow any trade
+CONT_PROB_TREND_GATE     = 0.60   # continuation_prob gate for trend-following setups
+TREND_SETUPS             = {"h2", "h1", "breakout_pullback", "l2", "l1", "inside_bar"}
+SETUP_WINDOW             = 50     # rolling window for setup expectancy
+REGIME_WINDOW            = 75     # rolling window for regime expectancy (wider = more stable)
+SETUP_MIN_TRADES         = 20     # minimum trades before SetupTracker can disable a setup
+REGIME_MIN_TRADES        = 20     # minimum trades before RegimeTracker can block a regime
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +101,95 @@ def _compute_labels(candles: list, atr_series: list) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Phase-2: Setup-Level Performance Tracker
+# ---------------------------------------------------------------------------
+
+class SetupTracker:
+    """
+    Rolling expectancy tracker per setup type.
+    Auto-disables setups whose avg_R over the last SETUP_WINDOW trades < 0.
+    Auto-recovers when avg_R turns positive again.
+    """
+
+    def __init__(self, window: int = SETUP_WINDOW):
+        self.window    = window
+        self._data     = {}        # { setup_type: deque of R values }
+        self._disabled = set()
+
+    def record(self, setup_type: str, r_value: float):
+        if setup_type not in self._data:
+            self._data[setup_type] = deque(maxlen=self.window)
+        self._data[setup_type].append(r_value)
+        vals = self._data[setup_type]
+        avg  = sum(vals) / len(vals)
+        if avg < 0 and len(vals) >= SETUP_MIN_TRADES:
+            self._disabled.add(setup_type)
+        else:
+            self._disabled.discard(setup_type)
+
+    def is_disabled(self, setup_type: str) -> bool:
+        """Only returns True if this setup has enough data AND is in disabled set."""
+        if len(self._data.get(setup_type, [])) < SETUP_MIN_TRADES:
+            return False
+        return setup_type in self._disabled
+
+    def stats(self) -> dict:
+        return {
+            k: {
+                "count":    len(d),
+                "avg_R":    round(sum(d) / len(d), 4) if d else 0.0,
+                "disabled": k in self._disabled,
+            }
+            for k, d in self._data.items()
+        }
+
+
+# ---------------------------------------------------------------------------
+# Phase-2: Per-Regime Expectancy Tracker
+# ---------------------------------------------------------------------------
+
+class RegimeTracker:
+    """
+    Rolling expectancy tracker per AI Regime (TREND / RANGE / TRANSITION).
+    Auto-blocks trading in any consistently-negative regime.
+    """
+
+    REGIMES = ("TREND", "RANGE", "TRANSITION")
+
+    def __init__(self, window: int = REGIME_WINDOW):
+        self.window   = window
+        self._data    = {r: deque(maxlen=window) for r in self.REGIMES}
+        self._blocked = set()
+
+    def record(self, regime: str, r_value: float):
+        if regime not in self._data:
+            return
+        self._data[regime].append(r_value)
+        vals = self._data[regime]
+        avg  = sum(vals) / len(vals)
+        if avg < 0 and len(vals) >= REGIME_MIN_TRADES:
+            self._blocked.add(regime)
+        else:
+            self._blocked.discard(regime)
+
+    def is_blocked(self, regime: str) -> bool:
+        """Only returns True if this regime has enough data AND is in blocked set."""
+        if len(self._data.get(regime, [])) < REGIME_MIN_TRADES:
+            return False
+        return regime in self._blocked
+
+    def stats(self) -> dict:
+        return {
+            r: {
+                "count":   len(d),
+                "avg_R":   round(sum(d) / len(d), 4) if d else 0.0,
+                "blocked": r in self._blocked,
+            }
+            for r, d in self._data.items()
+        }
+
+
+# ---------------------------------------------------------------------------
 # Strategy Selector mapping
 # ---------------------------------------------------------------------------
 
@@ -133,6 +236,10 @@ class RollingController:
         self.atr_buffer:     list[float] = []  # ATR at each bar
 
         self._bars_since_retrain = 0
+
+        # Phase-2: Performance-based gating trackers
+        self.setup_tracker  = SetupTracker(window=SETUP_WINDOW)
+        self.regime_tracker = RegimeTracker(window=REGIME_WINDOW)
 
         # Pattern Failure Memory (v5.0 preserved)
         self.pattern_results    = {}
@@ -205,6 +312,31 @@ class RollingController:
         key = (ctx.get("bias", "NEUTRAL"), ctx.get("environment", "TRANSITION"))
         return ALLOWED_SETUPS_MAP.get(key, [])
 
+    def get_phase2_gates(self, setup_type: str, ai_env: str,
+                         confidence: float, cont_prob: float) -> dict:
+        """
+        Returns a structured Phase-2 gating decision dict.
+        Call this AFTER get_context() so last_context is fresh.
+        Returned dict keys: block (bool), reason (str or None).
+        """
+        # Gate 1: Overall AI confidence
+        if self.ai_model.is_trained and confidence < CONFIDENCE_GATE:
+            return {"block": True, "reason": "LowConfidence"}
+
+        # Gate 2: Continuation probability for trend-following setups
+        if self.ai_model.is_trained and setup_type in TREND_SETUPS and cont_prob < CONT_PROB_TREND_GATE:
+            return {"block": True, "reason": "LowContinuationProb"}
+
+        # Gate 3: Per-regime expectancy
+        if self.regime_tracker.is_blocked(ai_env):
+            return {"block": True, "reason": f"RegimeBlocked:{ai_env}"}
+
+        # Gate 4: Per-setup expectancy
+        if self.setup_tracker.is_disabled(setup_type):
+            return {"block": True, "reason": f"SetupDisabled:{setup_type}"}
+
+        return {"block": False, "reason": None}
+
     # -------------------------------------------------------------------
     # Pattern Failure Memory (preserved from v5.0)
     # -------------------------------------------------------------------
@@ -227,3 +359,12 @@ class RollingController:
 
     def pattern_confidence_factor(self, pattern_type: str) -> float:
         return self.pattern_confidence.get(pattern_type, 1.0)
+
+    def update_trade_trackers(self, setup_type: str, ai_env: str, r_value: float):
+        """
+        Phase-2: Feed the trade's realized R-value into both the
+        SetupTracker and RegimeTracker after every completed trade.
+        """
+        if setup_type:
+            self.setup_tracker.record(setup_type, r_value)
+        self.regime_tracker.record(ai_env, r_value)

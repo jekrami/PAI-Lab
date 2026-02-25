@@ -134,43 +134,36 @@ class PAILabEngine:
             # --- Phase-1 v6: Feed bar into controller for labeling + training ---
             self.controller.add_bar(features, candle, atr)
 
-            # --- Phase-1 v6: Get AI Context ---
+            # --- Phase-2 v6: Get AI Context ---
             ctx = self.controller.get_context(features)
             ai_bias        = ctx["bias"]
             ai_env         = ctx["environment"]
             ai_cont_prob   = ctx["continuation_prob"]
+            ai_confidence  = ctx.get("confidence", 0.5)
 
-            # --- Phase-1 v6: Strategy Selector (setup gate) ---
-            # Only enforce once AI has completed its first training cycle
-            allowed = self.controller.allowed_setups(features)
-            ai_trained = self.controller.ai_model.is_trained
-            if not is_warmup and ai_trained and allowed is not None and pattern_type not in allowed:
-                # Context Logger — record blocked by strategy selector
-                self.logger.log_context(
-                    bar_time        = candle["time"],
-                    ai_bias         = ai_bias,
-                    ai_env          = ai_env,
-                    ai_cont_prob    = ai_cont_prob,
-                    selected_strategy = pattern_type,
-                    blocked_by_constraint = True,
-                    constraint_reason = "StrategySelector",
-                    final_execution = False
-                )
-                continue
-
-            # --- Phase-1 v6: Scale AI continuation_prob into pattern confidence ---
+            # --- Phase-2 v6: ALL gating (confidence + continuation + regime + setup + pattern) ---
+            gate = self.controller.get_phase2_gates(
+                setup_type = pattern_type,
+                ai_env     = ai_env,
+                confidence = ai_confidence,
+                cont_prob  = ai_cont_prob
+            )
+            # Also apply pattern memory as an additional gate layer
             confidence_factor = self.controller.pattern_confidence_factor(pattern_type)
-            if not is_warmup and confidence_factor < 0.5:
-                # Context Logger — blocked by pattern memory
+            if not gate["block"] and not is_warmup and confidence_factor < 0.5:
+                gate = {"block": True, "reason": "PatternMemory"}
+
+            if not is_warmup and gate["block"]:
                 self.logger.log_context(
-                    bar_time        = candle["time"],
-                    ai_bias         = ai_bias,
-                    ai_env          = ai_env,
-                    ai_cont_prob    = ai_cont_prob,
-                    selected_strategy = pattern_type,
+                    bar_time              = candle["time"],
+                    ai_bias               = ai_bias,
+                    ai_env                = ai_env,
+                    ai_cont_prob          = ai_cont_prob,
+                    ai_confidence         = ai_confidence,
+                    selected_strategy     = pattern_type,
                     blocked_by_constraint = True,
-                    constraint_reason = "PatternMemory",
-                    final_execution = False
+                    constraint_reason     = gate["reason"],
+                    final_execution       = False
                 )
                 continue
 
@@ -242,8 +235,11 @@ class PAILabEngine:
                     if self.monitor.equity[-1] >= max(self.monitor.equity[:-1]):
                         self.risk_manager.restore_risk()
 
-            # Model update — Pattern failure memory only (model retraining handled by add_bar)
-            self.controller.update_pattern_memory(pattern_type, outcome)
+            if not is_warmup:
+                # Phase-2: Feed realized R into Setup and Regime trackers (live only)
+                self.controller.update_trade_trackers(pattern_type, ai_env, trade_return)
+                # Pattern failure memory (live only)
+                self.controller.update_pattern_memory(pattern_type, outcome)
 
             # -------------------------------------------------
             # Telemetry Logging
@@ -266,6 +262,7 @@ class PAILabEngine:
                     ai_bias           = ai_bias,
                     ai_env            = ai_env,
                     ai_cont_prob      = ai_cont_prob,
+                    ai_confidence     = ai_confidence,
                     selected_strategy = pattern_type,
                     blocked_by_constraint = False,
                     constraint_reason = None,
@@ -332,6 +329,14 @@ class PAILabEngine:
         for k, v in summary.items():
             print(f"{k}: {v}")
 
+        # Phase-2: Post-run analysis reports
+        from intelligence.analysis_tools import (
+            calibration_test, feature_importance_report, setup_regime_report
+        )
+        print()
+        setup_regime_report(self.controller)
+        feature_importance_report(self.controller)
+        calibration_test()
 
 # =====================================================
 # ENTRY POINT

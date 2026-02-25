@@ -1,5 +1,5 @@
-# 2026-02-26 | Phase-1 v6 | AI Context Model (RandomForest baseline) | Writer: J.Ekrami | Co-writer: Antigravity
-# v6.0.0
+# 2026-02-26 | Phase-2 v6 | AI Context Model (selective gating) | Writer: J.Ekrami | Co-writer: Antigravity
+# v6.1.0
 """
 Standalone AI module for regime context prediction.
 Responsibilities:
@@ -128,11 +128,19 @@ class AIContextModel:
         else:
             environment = "TRANSITION"
 
+        # --- Confidence: max probability across the dominant class of each model ---
+        # Represents how strongly the AI 'believes' its own predictions.
+        bias_conf = float(max(bias_probs_raw))
+        env_conf  = float(max(env_probs_raw))
+        cont_conf = float(max(cont_probs_raw))
+        confidence = round((bias_conf + env_conf + cont_conf) / 3.0, 3)
+
         self.last_context = {
             "bull_prob":          round(bull_prob,  3),
             "bear_prob":          round(bear_prob,  3),
             "trend_prob":         round(trend_prob, 3),
             "continuation_prob":  round(cont_prob,  3),
+            "confidence":         confidence,
             "bias":               bias,
             "environment":        environment
         }
