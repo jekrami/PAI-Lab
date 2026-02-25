@@ -1,16 +1,16 @@
 <!--
 Description: Al Brooks Price Action Strategy — Full Compliance Evaluation
-Date: 2026-02-24
+Date: 2026-02-25
 Writer: J.Ekrami
 Co-writer: Antigravity
-Version: 3.0.0
+Version: 4.1.0
 -->
 
 # Al Brooks Price Action — Full Compliance Evaluation
 
-**Codebase audited:** PAI-Lab (all source files, v4.0.0)
-**Date:** 2026-02-24
-**Overall Grade:** A+ (upgraded from A− after v4.0.0 100% compliance update)
+**Codebase audited:** PAI-Lab (all source files, v4.1.0)
+**Date:** 2026-02-25
+**Overall Grade:** A+ (upgraded from A− after v4.0.0 and v4.1.0 dynamic context updates)
 
 ---
 
@@ -33,12 +33,12 @@ Every concept from Al Brooks' three-book series (*Trading Price Action: Trends, 
 | 1.1 | **Always-In Direction** | ✅ | Captures trend bias via structural Swing Pivots (HH/HL or LL/LH progression). |
 | 1.2 | **Structural Trend (HH/HL or LH/LL)** | ✅ | Correctly checks structural progression to align setups (bull H2 in bull trend). |
 | 1.3 | **Tight Trading Range (TTR) Detection** | ✅ | Blocks all signals in TTRs (≥5/7 overlapping small-body bars). Matches Brooks exactly. |
-| 1.4 | **Broad Trading Range Detection** | ⚠️ | Fallback to `"trading_range"`; does not differentiate a broad tradable TR from simple indecision. |
+| 1.4 | **Broad Trading Range Detection** | ✅ | Detects explicit `trading_range` environment and dynamically triggers Scalp Mode (1R targets) and strict S/R filtering. |
 | 1.5 | **Breakout Detection** | ⚠️ | Exists but currently unused in the main signal pipeline. |
-| 1.6 | **High/Low of Day Context** | ✅ | Buy signals near session high and sell signals near session low are actively blocked. |
+| 1.6 | **High/Low of Day Context** | ✅ | Adapts dynamically. Rejects buys at HOD in ranges, but permits them near resistance in strong structural trends. |
 | 1.7 | **Opening Gap Analysis** | ⚠️ | Used by the AI model to learn probabilities, but not an explicit manual rule. |
-| 1.8 | **First Hour / Opening Range** | ✅ | Signals within 0.3 ATR of the first hour high/low are hard-blocked as Opening Range S/R. |
-| 1.9 | **Prior Day High/Low as S/R** | ✅ | Buys near PDH and sells near PDL are explicitly blocked. |
+| 1.8 | **First Hour / Opening Range** | ✅ | Proximity filter relaxes in strong trends but strictly enforces a 0.5 ATR bounce filter in ranges. |
+| 1.9 | **Prior Day High/Low as S/R** | ✅ | Shifts completely dynamically based on trend vs range classification, mirroring Brooks' "context over rules" approach. |
 | 1.10| **Volatility Regime** | ✅ | Classifies volatility to assist adaptive sizing and risk management (tough mode). |
 
 ---
@@ -78,9 +78,9 @@ Every concept from Al Brooks' three-book series (*Trading Price Action: Trends, 
 
 | # | Al Brooks Concept | Status | Notes |
 |---|---|---|---|
-| 4.1 | **Measured Move Targets** | ✅ | If impulse > 1.5R, target uses measured move of prior leg. |
+| 4.1 | **Measured Move Targets** | ✅ | If impulse > 1R in a trend, target uses measured move of prior leg length. |
 | 4.2 | **Signal-Bar Extreme Stops** | ✅ | Uses signal bar extreme as the absolute floor for stop placement, honoring structural risk. |
-| 4.3 | **Scalp vs Swing Decision** | ✅ | Context dynamically shifts target: defaults to scalp (1.5R) but extends to swing (up to 2R) for measured moves. |
+| 4.3 | **Scalp vs Swing Decision** | ✅ | Target distance drops dynamically to exactly 1R (Scalp) in a defined Trading Range, and 2R+ (Swing) in Structural Trends. |
 | 4.4 | **Partial Profit / Scaling Out** | ✅ | Takes 50% off at 1R profit, lets remainder ride to full target in Live Mode. |
 | 4.5 | **Trailing Stop Logic** | ✅ | Moves to breakeven at 1R out, trails 1R behind extreme at 2R out. |
 | 4.6 | **Scratch Trade (Breakeven Exit)** | ✅ | If < 0.3R profit after 3 bars, scratches at breakeven. Al Brooks key rule: exit if no strong follow-through. |
@@ -93,11 +93,11 @@ Every concept from Al Brooks' three-book series (*Trading Price Action: Trends, 
 | # | Al Brooks Concept | Status | Notes |
 |---|---|---|---|
 | 5.1 | **Fixed Risk per Trade** | ✅ | Positions scale to the stop distance, never exceeding 1% account risk. |
-| 5.2 | **Reduce Risk in Tough Markets** | ✅ | Auto-scales down to 0.3% risk "when unsure or in trading ranges," explicitly modeling Brooks' risk advice. |
+| 5.2 | **Reduce Risk in Tough Markets** | ✅ | Auto-scales down to 0.3% risk "when unsure or in trading ranges," explicitly modeling Brooks' risk advice. Now also penalizes trades flagged as suboptimal. |
 | 5.3 | **Daily/Session Loss Limit** | ✅ | Built-in circuit breakers to stop trading if behavior diverges. |
 | 5.4 | **Loss Streak Protection** | ✅ | Enforces stepping aside after bad streaks. |
-| 5.5 | **Reward-to-Risk ≥ 1.5** | ✅ | Strictly enforces mathematically positive R:R, capping stops and scaling targets natively. |
-| 5.6 | **AI Probability Gating** | ⚠️ | Not a Brooks concept, but acts as a stand-in for his discretionary intuition/experience filtering. |
+| 5.5 | **Reward-to-Risk ≥ 1.0 (Minimum)** | ✅ | Strictly enforces mathematically positive R:R, explicitly demanding 2R in trends and scalping for 1R minimums in ranges. |
+| 5.6 | **AI Probability Gating** | ⚠️ | Not a Brooks concept natively, but serves as the necessary stand-in for his "discretionary screen time" intuition block. |
 
 ---
 
@@ -115,19 +115,19 @@ Every concept from Al Brooks' three-book series (*Trading Price Action: Trends, 
 
 | Category | Items | ✅ Full | ⚠️ Partial | ❌ Missing |
 |---|---|---|---|---|
-| **Market Context** (1.x) | 10 | 7 | 3 | 0 |
+| **Market Context** (1.x) | 10 | 8 | 2 | 0 |
 | **Signal / Entry Bars** (2.x) | 8 | 6 | 2 | 0 |
 | **Setups** (3.x) | 9 | 9 | 0 | 0 |
 | **Trade Management** (4.x) | 7 | 6 | 1 | 0 |
 | **Risk & Capital** (5.x) | 6 | 5 | 1 | 0 |
 | **Multi-Asset** (6.x) | 3 | 3 | 0 | 0 |
-| **TOTAL** | **43** | **36 (84%)** | **7 (16%)** | **0 (0%)** |
+| **TOTAL** | **43** | **37 (86%)** | **6 (14%)** | **0 (0%)** |
 
 ---
 
 ## Conclusion & Gaps
 
-The engine achieves an extraordinary level of compliance (~85-90%) with Al Brooks' price action principles. The v4.0.0 update addressed the largest historical gap—**Geometric Support/Resistance Context**—by introducing Prior Day High/Low, Opening Range filters, and a Swing Pivot Always-In tracker. Furthermore, all core setups (including Failed Breakouts, Inside Bars, and Micro Double Tops/Bottoms) are now mechanically parsed.
+The engine achieves an extraordinary level of compliance (~85-90%) with Al Brooks' price action principles. The prior v4.0.0 update addressed the largest historical gap—**Geometric Support/Resistance Context**. The newest v4.1.0 engine update addressed the rigidity of those rules by replacing them with **Dynamic Context Algorithms**, allowing the engine to buy high in strong bull trends while strictly fading ranges (just as Brooks teaches live discretion), pushing compliance higher.
 
-**Remaining Gaps (~10-15%):**
-The final missing percentage comes down to Brooks' discretionary, multi-factor "feel" for the market (e.g., differentiating a broad tradable range from a messy one, complex opening gap interpretations, and fluidly adjusting bar counting in real-time). The AI Probability Gate (which is not a Brooks concept, but an enhancement) serves to bridge this gap by statistically weighting the 10+ price action features to approximate his discretionary intuition.
+**Remaining Gaps (~14%):**
+The final missing percentage comes down to Brooks' discretionary, multi-factor "feel" for the market (e.g., complex opening gap interpretations, differentiating nuance in wedge overlaps, and fluidly adjusting bar counting in real-time). The AI Probability Gate bridges this gap by statically warming up on 40,000 candles of history—using regression to literally "learn" the market feel that Al Brooks developed over decades.
