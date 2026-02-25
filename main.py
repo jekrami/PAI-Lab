@@ -1,4 +1,4 @@
-# 2026-02-25 | v3.1.0 | Backtest engine runner | Writer: J.Ekrami | Co-writer: Antigravity
+# 2026-02-26 | Phase-1 v6 | Backtest engine runner | Writer: J.Ekrami | Co-writer: Antigravity
 """
 main.py
 
@@ -55,7 +55,7 @@ class PAILabEngine:
         #self.memory = MarketMemory(maxlen=100)
         self.core = CoreEngine()
 
-        self.controller = RollingController(train_window=100)
+        self.controller = RollingController(train_window=300, retrain_every=50)
         self.monitor = PerformanceMonitor()
         self.regime_guard = RegimeGuard(window=20)
         self.logger = TelemetryLogger()
@@ -130,11 +130,50 @@ class PAILabEngine:
             if not is_warmup and not self.regime_guard.allow_trading():
                 continue
 
-            # 🔹 Probability Controller (Skip evaluation during warmup, force trade to gather data)
-            if not is_warmup:
-                allow_trade = self.controller.evaluate_trade(features, signal_type=pattern_type)
-                if not allow_trade:
-                    continue
+            # 🔹 Probability Controller: v6 uses Strategy Selector gate instead of evaluate_trade
+            # --- Phase-1 v6: Feed bar into controller for labeling + training ---
+            self.controller.add_bar(features, candle, atr)
+
+            # --- Phase-1 v6: Get AI Context ---
+            ctx = self.controller.get_context(features)
+            ai_bias        = ctx["bias"]
+            ai_env         = ctx["environment"]
+            ai_cont_prob   = ctx["continuation_prob"]
+
+            # --- Phase-1 v6: Strategy Selector (setup gate) ---
+            # Only enforce once AI has completed its first training cycle
+            allowed = self.controller.allowed_setups(features)
+            ai_trained = self.controller.ai_model.is_trained
+            if not is_warmup and ai_trained and allowed is not None and pattern_type not in allowed:
+                # Context Logger — record blocked by strategy selector
+                self.logger.log_context(
+                    bar_time        = candle["time"],
+                    ai_bias         = ai_bias,
+                    ai_env          = ai_env,
+                    ai_cont_prob    = ai_cont_prob,
+                    selected_strategy = pattern_type,
+                    blocked_by_constraint = True,
+                    constraint_reason = "StrategySelector",
+                    final_execution = False
+                )
+                continue
+
+            # --- Phase-1 v6: Scale AI continuation_prob into pattern confidence ---
+            confidence_factor = self.controller.pattern_confidence_factor(pattern_type)
+            if not is_warmup and confidence_factor < 0.5:
+                # Context Logger — blocked by pattern memory
+                self.logger.log_context(
+                    bar_time        = candle["time"],
+                    ai_bias         = ai_bias,
+                    ai_env          = ai_env,
+                    ai_cont_prob    = ai_cont_prob,
+                    selected_strategy = pattern_type,
+                    blocked_by_constraint = True,
+                    constraint_reason = "PatternMemory",
+                    final_execution = False
+                )
+                continue
+
             # Al Brooks: enter on break of signal bar
             #   Bullish → enter at signal bar high (breakout above)
             #   Bearish → enter at signal bar low (breakdown below)
@@ -203,9 +242,8 @@ class PAILabEngine:
                     if self.monitor.equity[-1] >= max(self.monitor.equity[:-1]):
                         self.risk_manager.restore_risk()
 
-            # Model update (Crucial during warmup, this is how it learns!)
-            self.controller.update_history(features, outcome, pattern_type=pattern_type)
-            self.controller.retrain_if_ready()
+            # Model update — Pattern failure memory only (model retraining handled by add_bar)
+            self.controller.update_pattern_memory(pattern_type, outcome)
 
             # -------------------------------------------------
             # Telemetry Logging
@@ -214,13 +252,25 @@ class PAILabEngine:
             if not is_warmup:
                 metrics = self.regime_guard.last_metrics
 
-                probability = 0
-                if self.controller.trained:
-                    probability = self.controller.model.predict_proba(
-                        self.controller.scaler.transform(
-                            pd.DataFrame([features])
-                        )
-                    )[0][1]
+                # v6: use let context from the AI model
+                probability = ctx["continuation_prob"]
+
+                equity_after = self.monitor.equity[-1]
+                equity_before = (
+                    self.monitor.equity[-2] if len(self.monitor.equity) >= 2 else 0
+                )
+
+                # --- Context Logger: successful execution ---
+                self.logger.log_context(
+                    bar_time          = candle["time"],
+                    ai_bias           = ai_bias,
+                    ai_env            = ai_env,
+                    ai_cont_prob      = ai_cont_prob,
+                    selected_strategy = pattern_type,
+                    blocked_by_constraint = False,
+                    constraint_reason = None,
+                    final_execution   = True
+                )
 
                 equity_after = self.monitor.equity[-1]
                 equity_before = (
@@ -234,7 +284,7 @@ class PAILabEngine:
                     rolling_winrate=metrics["winrate"],
                     rolling_sum=metrics["sum"],
                     rolling_volatility=metrics["volatility"],
-                    adaptive_threshold=self.controller.current_threshold,
+                    adaptive_threshold=0.6,  # v6: fixed AI threshold (context model)
                     probability=probability,
                     paused=self.regime_guard.paused,
                 )
@@ -258,7 +308,7 @@ class PAILabEngine:
                     equity_before=equity_before,
                     equity_after=equity_after,
                     probability=probability,
-                    adaptive_threshold=self.controller.current_threshold,
+                    adaptive_threshold=0.6,  # v6: fixed context threshold
                     regime_paused=self.regime_guard.paused,
                 )
 

@@ -1,4 +1,4 @@
-# 2026-02-17 | v0.1.0 | Telemetry and trade logger | Writer: J.Ekrami | Co-writer: GPT-5.1
+# 2026-02-26 | Phase-1 v6 | Telemetry and trade logger | Writer: J.Ekrami | Co-writer: Antigravity
 import csv
 import os
 from datetime import datetime
@@ -9,11 +9,13 @@ class TelemetryLogger:
     def __init__(self,
                  metrics_path="logs/live_metrics.csv",
                  regime_path="logs/regime_events.csv",
-                 trades_path="logs/trades.csv"):
+                 trades_path="logs/trades.csv",
+                 context_path="logs/ai_context.csv"):
 
-        self.metrics_path = metrics_path
-        self.regime_path = regime_path
-        self.trades_path = trades_path
+        self.metrics_path  = metrics_path
+        self.regime_path   = regime_path
+        self.trades_path   = trades_path
+        self.context_path  = context_path
 
         os.makedirs("logs", exist_ok=True)
 
@@ -52,6 +54,12 @@ class TelemetryLogger:
                 "regime_paused",
             ],
         )
+
+        # Phase-1 v6: Context decision log
+        self._init_file(self.context_path,
+                        ["bar_time", "ai_bias", "ai_env", "ai_cont_prob",
+                         "selected_strategy", "blocked_by_constraint",
+                         "constraint_reason", "final_execution"])
 
     def _init_file(self, path, headers):
         if not os.path.exists(path):
@@ -141,3 +149,19 @@ class TelemetryLogger:
                     regime_paused,
                 ]
             )
+    def log_context(self, bar_time, ai_bias, ai_env, ai_cont_prob,
+                    selected_strategy, blocked_by_constraint,
+                    constraint_reason, final_execution):
+        """Phase-1 v6: Log per-bar AI context and execution decision."""
+        with open(self.context_path, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                bar_time,
+                ai_bias,
+                ai_env,
+                round(ai_cont_prob, 4),
+                selected_strategy,
+                blocked_by_constraint,
+                constraint_reason or "",
+                final_execution
+            ])
