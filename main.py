@@ -1,4 +1,4 @@
-# 2026-02-26 | Phase-1 v6 | Backtest engine runner | Writer: J.Ekrami | Co-writer: Antigravity
+# 2026-02-26 | v6.1.1 | Backtest engine runner | Writer: J.Ekrami | Co-writer: Antigravity
 """
 main.py
 
@@ -21,6 +21,9 @@ It does NOT:
 - Manage deployment
 """
 
+import argparse
+import glob
+import os
 import pandas as pd
 import numpy as np
 
@@ -342,7 +345,62 @@ class PAILabEngine:
 # ENTRY POINT
 # =====================================================
 
+def _do_refresh(asset_id: str = "BTCUSDT"):
+    """
+    --refresh: wipe all persisted state and generated log files.
+    Keeps raw data CSVs (btc_5m_extended.csv, truth_dataset.csv).
+    """
+    removed = []
+
+    # 1. Engine state pickle(s)
+    for f in glob.glob(f"state/engine_state_*.pkl"):
+        os.remove(f)
+        removed.append(f)
+
+    # 2. Generated log CSVs (metrics, trades, regime events, ai context)
+    log_patterns = [
+        "logs/metrics*.csv",
+        "logs/trades*.csv",
+        "logs/regime_events*.csv",
+        "logs/ai_context*.csv",
+        "logs/live_*.csv",
+    ]
+    for pattern in log_patterns:
+        for f in glob.glob(pattern):
+            os.remove(f)
+            removed.append(f)
+
+    if removed:
+        print("🗑️  Refresh — removed:")
+        for f in removed:
+            print(f"   {f}")
+    else:
+        print("🗑️  Refresh — nothing to remove (already clean).")
+    print()
+
+
 if __name__ == "__main__":
 
-    engine = PAILabEngine("btc_5m_extended.csv", asset_id="BTCUSDT")
+    parser = argparse.ArgumentParser(description="PAI-Lab backtest engine")
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Delete all saved state (.pkl) and generated log CSVs before running."
+    )
+    parser.add_argument(
+        "--asset",
+        default="BTCUSDT",
+        help="Asset ID to run (default: BTCUSDT)"
+    )
+    parser.add_argument(
+        "--data",
+        default="btc_5m_extended.csv",
+        help="Path to input CSV (default: btc_5m_extended.csv)"
+    )
+    args = parser.parse_args()
+
+    if args.refresh:
+        _do_refresh(asset_id=args.asset)
+
+    engine = PAILabEngine(args.data, asset_id=args.asset)
     engine.run()

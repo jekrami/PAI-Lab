@@ -1,4 +1,4 @@
-# 2026-02-25 | v3.1.0 | Live paper trading runner | Writer: J.Ekrami | Co-writer: Antigravity
+# 2026-02-26 | v3.2.0 | Live paper trading runner | Writer: J.Ekrami | Co-writer: Antigravity
 """
 live_runner.py
 
@@ -10,6 +10,7 @@ Fully independent live paper trading mode.
 - Enforces session window based on asset config
 - No CSV dependency
 - No replay contamination
+- Phase-2: AI gating via get_context() / get_phase2_gates()
 """
 
 import time
@@ -53,7 +54,7 @@ def _is_within_session(dt_utc, session_str):
 
 core = CoreEngine()
 resolver = LiveResolver()
-controller = RollingController(train_window=100)
+controller = RollingController(train_window=300, retrain_every=50)
 regime = RegimeGuard()
 risk = RiskManager()
 feed = BinanceLiveFeed()
@@ -117,30 +118,33 @@ while True:
         })
 
         outcome, pos_info = resolver.update(candle)
-        
+
         # Ensure we have a valid UTC datetime to pass to risk manager
         candle_dt = candle.get("open_time") or candle.get("time")
         if isinstance(candle_dt, (int, float)):
-            from datetime import timezone
             dt_utc = datetime.fromtimestamp(candle_dt / 1000, timezone.utc)
         else:
             dt_utc = candle_dt
-            
+
         if outcome is not None and pos_info is not None:
             # Normalize trade return to ATR units for risk/regime tracking
             stop_d = pos_info.get("stop_dist", 1.0)
             target_d = pos_info.get("target_dist", 2.0)
-            # We need ATR for normalization — compute from recent memory
-            recent_bars = [c for c in [candle] if c]  # placeholder
             atr_est = stop_d  # fallback: assume stop ≈ 1 ATR
             trade_return = (target_d / atr_est) if outcome == 1 else -(stop_d / atr_est)
             regime.update(trade_return)
             risk.update(trade_return, [paper_equity], current_time=dt_utc)
 
             used_features = pos_info.get("features")
-            if used_features is not None:
-                controller.update_history(used_features, outcome)
-                controller.retrain_if_ready()
+
+            # --- Phase-2: Feed trade result into performance trackers ---
+            setup_type = pos_info.get("setup_type", "")
+            ai_env = pos_info.get("ai_env", "TRANSITION")
+            controller.update_trade_trackers(setup_type, ai_env, trade_return)
+
+            # Also update pattern memory (v5 retained)
+            if setup_type:
+                controller.update_pattern_memory(setup_type, outcome)
 
             # Paper equity update (scaled by position size)
             size = pos_info.get("size", 1.0)
@@ -148,14 +152,10 @@ while True:
             paper_equity = paper_equity + trade_return * size
             equity_after = paper_equity
 
-            # Probability snapshot (may be 0 if not trained)
-            probability = 0
-            if controller.trained:
-                probability = controller.model.predict_proba(
-                    controller.scaler.transform(
-                        pd.DataFrame([used_features])
-                    )
-                )[0][1]
+            # --- Phase-2: Get AI context probabilities for logging ---
+            ai_context = controller.get_context(used_features) if used_features else {}
+            confidence = ai_context.get("confidence", 0.0)
+            cont_prob = ai_context.get("continuation_prob", 0.5)
 
             logger.log_trade(
                 mode="live",
@@ -171,8 +171,8 @@ while True:
                 outcome=outcome,
                 equity_before=equity_before,
                 equity_after=equity_after,
-                probability=probability,
-                adaptive_threshold=controller.current_threshold,
+                probability=confidence,
+                adaptive_threshold=0.60,   # Phase-2 fixed gate
                 regime_paused=regime.paused,
             )
 
@@ -197,8 +197,6 @@ while True:
             if not _is_within_session(dt_utc, ASSET_CONFIG.get("session", "24/7")):
                 continue
 
-        print(f"Current Adaptive Threshold: {controller.current_threshold:.2f}")
-        
         signal = core.detect_signal()
         if signal == "tight_trading_range" or not signal:
             continue
@@ -209,8 +207,23 @@ while True:
 
         features, atr, is_suboptimal, env = feature_pack
 
-        if not controller.evaluate_trade(features):
+        # --- Phase-2: run controller add_bar for walk-forward retraining ---
+        controller.add_bar(features, candle, atr)
+
+        # --- Phase-2: AI context + gating ---
+        ai_context = controller.get_context(features)
+        confidence  = ai_context.get("confidence", 0.0)
+        cont_prob   = ai_context.get("continuation_prob", 0.5)
+        ai_env      = ai_context.get("environment", "TRANSITION")
+        setup_type  = signal.get("setup_type", "") if isinstance(signal, dict) else str(signal)
+
+        gate = controller.get_phase2_gates(setup_type, ai_env, confidence, cont_prob)
+        if gate["block"]:
+            print(f"[Phase-2] Trade blocked: {gate['reason']} "
+                  f"(conf={confidence:.2f}, cont={cont_prob:.2f})")
             continue
+
+        print(f"[AI] env={ai_env} conf={confidence:.2f} cont={cont_prob:.2f} | setup={setup_type}")
 
         entry_price = candle["high"]
 
@@ -230,7 +243,7 @@ while True:
 
         # Compute stop distance for position sizing
         from execution.resolvers import compute_stop_target
-        direction = signal.get("direction", "bullish")
+        direction = signal.get("direction", "bullish") if isinstance(signal, dict) else "bullish"
         _, _, stop_dist, _ = compute_stop_target(
             entry_price, atr, direction, signal_bar,
             asset_config=ASSET_CONFIG, features=features, env=env
@@ -239,6 +252,7 @@ while True:
         # Position size: risk exactly 1% (or 0.3%) of account
         position_size = position_sizer.size(stop_dist, [paper_equity], tough_mode=tough_mode)
 
+        # Store ai_env in the position so it can be recovered on trade close
         resolver.open_position(
             entry_price=entry_price,
             atr=atr,
@@ -248,7 +262,7 @@ while True:
             entry_time=candle["open_time"],
             asset_config=ASSET_CONFIG,
             signal_bar=signal_bar,
-            env=env
+            env=env,
         )
     else:
         print("Waiting for new CLOSED 5m candle...")

@@ -8,7 +8,7 @@ BASE_URL = "https://data-api.binance.vision/api/v3/klines"
 SYMBOL = "BTCUSDT"
 INTERVAL = "5m"
 LIMIT = 1000  # max per request
-TOTAL_BARS = 50000  # change as needed
+TOTAL_BARS = 100000  # change as needed
 
 all_data = []
 end_time = None
