@@ -91,6 +91,19 @@
 
 ---
 
+## Phase 2.5 v6 — Structural Alignment (Event-Based ATR Labeling)
+
+**Branch:** `v6-phase2.5`
+**Goal:** Replace fixed-horizon (10-bar) labeling with true Event-Based ATR resolution labeling (max 50 bars) to align AI targets perfectly with actual trade mechanics.
+
+### Tasks
+- [x] Replace `forward_return_10` with target (+1 ATR) vs stop (-1 ATR) intrabar touch logic.
+- [x] Set `max_bars = 50`. Unresolved signals (no target or stop hit within 50 bars) are discarded (`NaN`).
+- [x] Add pre-walk-forward diagnostics (Event win/loss/discard % and Pearson correlations with `impulse_size_atr` / `breakout_strength`).
+- [ ] Retrain walk-forward and measure real edge.
+
+---
+
 ## Phase-3 v6 — *(Planned)*
 
 > To be defined after Phase-2 success criteria are met.

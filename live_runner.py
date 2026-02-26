@@ -116,6 +116,7 @@ while True:
             "low": candle["low"],
             "close": candle["close"],
         })
+        controller.add_market_bar(candle)
 
         outcome, pos_info = resolver.update(candle)
 
@@ -208,7 +209,8 @@ while True:
         features, atr, is_suboptimal, env = feature_pack
 
         # --- Phase-2: run controller add_bar for walk-forward retraining ---
-        controller.add_bar(features, candle, atr)
+        market_index = len(controller.market_buffer) - 1
+        controller.add_bar(features, candle, atr, market_index=market_index)
 
         # --- Phase-2: AI context + gating ---
         ai_context = controller.get_context(features)

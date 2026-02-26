@@ -18,7 +18,7 @@ from intelligence.ai_context_model import AIContextModel
 
 
 # ---------------------------------------------------------------------------
-# Phase-2 Constants
+# Phase-2.5 Constants
 # ---------------------------------------------------------------------------
 
 CONFIDENCE_GATE          = 0.60   # minimum AI model confidence to allow any trade
@@ -29,70 +29,95 @@ REGIME_WINDOW            = 75     # rolling window for regime expectancy (wider 
 SETUP_MIN_TRADES         = 20     # minimum trades before SetupTracker can disable a setup
 REGIME_MIN_TRADES        = 20     # minimum trades before RegimeTracker can block a regime
 
+MAX_BARS                 = 50     # maximum forward scan for event-based label resolution
+
 
 # ---------------------------------------------------------------------------
 # Label generation helpers
 # ---------------------------------------------------------------------------
 
-ATR_BIAS_THRESHOLD  = 0.3   # forward 10-bar return must exceed 0.3 ATR for directional bias
-ATR_TREND_THRESHOLD = 0.5   # directional move > 0.5 ATR within 10 bars = Trend
-CONT_BARS           = 5     # number of forward bars to check for continuation
-LABEL_HORIZON       = 10    # bars forward for Bias / Env labels
-
-
-def _compute_labels(candles: list, atr_series: list) -> pd.DataFrame:
+def _compute_labels(candles: list, atr_series: list, market_indices: list, market_buffer: list) -> pd.DataFrame:
     """
-    Generates forward-looking labels for each bar in the buffer.
-    The final LABEL_HORIZON bars cannot be labelled (insufficient future data),
-    so they are dropped before training.
-
-    Returns DataFrame with columns: ['bias', 'env', 'cont']
+    Generates event-based ATR outcome labels using true contiguous market bars.
+    Target = close + atr. Stop = close - atr.
+    Forward scan max MAX_BARS true 5m bars. First-touch logic (high/low).
+    Unresolved signals (neither hit in MAX_BARS) return NaN and are discarded.
     """
     n = len(candles)
     bias_list = []
     env_list  = []
     cont_list = []
 
-    for i in range(n - LABEL_HORIZON):
+    for i in range(n):
+        market_idx = market_indices[i]
+        
+        # If we don't have enough future market bars to guarantee resolution logic, we must discard.
+        # But we can also scan up to len(market_buffer). If it hits within available bars, it's valid.
+        # If it doesn't hit and we don't have MAX_BARS future bars, we must discard.
+        
         close_now = candles[i]['close']
-        atr       = atr_series[i] if atr_series[i] > 0 else 1.0
-
-        # Forward closes used for all 3 labels
-        future_closes  = [c['close'] for c in candles[i + 1 : i + LABEL_HORIZON + 1]]
-        future_highs   = [c['high']  for c in candles[i + 1 : i + LABEL_HORIZON + 1]]
-        future_lows    = [c['low']   for c in candles[i + 1 : i + LABEL_HORIZON + 1]]
-
-        forward_return   = future_closes[-1] - close_now
-        max_up   = max(future_highs)  - close_now
-        max_down = close_now - min(future_lows)
-
-        # --- Bias ---
-        threshold = ATR_BIAS_THRESHOLD * atr
-        if forward_return > threshold:
-            bias = 1
-        elif forward_return < -threshold:
-            bias = -1
+        atr = atr_series[i] if atr_series[i] > 0 else 1.0
+        
+        target_up = close_now + atr
+        stop_up   = close_now - atr
+        
+        target_down = close_now - atr
+        stop_down   = close_now + atr
+        
+        bull_event = None
+        bear_event = None
+        
+        for j in range(1, MAX_BARS + 1):
+            if market_idx + j >= len(market_buffer):
+                break
+                
+            future_bar = market_buffer[market_idx + j]
+            f_high = future_bar['high']
+            f_low  = future_bar['low']
+            
+            # Check bull event first-touch
+            if bull_event is None:
+                if f_high >= target_up and f_low <= stop_up:
+                    bull_event = 0
+                elif f_high >= target_up:
+                    bull_event = 1
+                elif f_low <= stop_up:
+                    bull_event = 0
+                    
+            # Check bear event first-touch
+            if bear_event is None:
+                if f_low <= target_down and f_high >= stop_down:
+                    bear_event = 0
+                elif f_low <= target_down:
+                    bear_event = 1
+                elif f_high >= stop_down:
+                    bear_event = 0
+                    
+            if bull_event is not None and bear_event is not None:
+                break
+                
+        # --- Mapping to AI targets ---
+        if bull_event is None or bear_event is None:
+            # Unresolved -> discard
+            bias = np.nan
+            env = np.nan
+            cont = np.nan
         else:
-            bias = 0
-
-        # --- Environment ---
-        # Trend if directional move > 1 ATR AND forward return is unidirectional
-        directional_move = max(max_up, max_down)
-        overlapping_bars = sum(
-            1 for j in range(1, min(LABEL_HORIZON, len(future_closes)))
-            if (future_closes[j] > future_closes[j - 1]) == (future_closes[0] > close_now)
-        )
-        env = int(directional_move > ATR_TREND_THRESHOLD * atr and overlapping_bars >= LABEL_HORIZON * 0.6)
-
-        # --- Continuation (5 bars) ---
-        cont_closes = future_closes[:CONT_BARS]
-        if forward_return > 0:
-            cont = int(cont_closes[-1] > close_now)
-        elif forward_return < 0:
-            cont = int(cont_closes[-1] < close_now)
-        else:
-            cont = 0
-
+            if bull_event == 1 and bear_event == 0:
+                bias = 1
+            elif bear_event == 1 and bull_event == 0:
+                bias = -1
+            else:
+                bias = 0  
+                
+            env = 1 if (bull_event == 1 or bear_event == 1) else 0
+            
+            is_green = (close_now >= candles[i]['open'])
+            if is_green:
+                cont = bull_event
+            else:
+                cont = bear_event
+                
         bias_list.append(bias)
         env_list.append(env)
         cont_list.append(cont)
@@ -230,10 +255,13 @@ class RollingController:
 
         self.ai_model = AIContextModel()
 
-        # Rolling buffers — one entry per bar (not per trade)
-        self.feature_buffer: list[dict] = []   # features at each bar
+        # Rolling buffers — one entry per setup (not per 5m bar)
+        self.feature_buffer: list[dict] = []   # features at each setup
         self.candle_buffer:  list[dict] = []   # raw candle for forward-label computation
-        self.atr_buffer:     list[float] = []  # ATR at each bar
+        self.atr_buffer:     list[float] = []  # ATR at each setup
+        self.market_indices_buffer: list[int] = [] # Index of setup in market_buffer
+
+        self.market_buffer: list[dict] = []    # Raw 5m bar stream (continuous)
 
         self._bars_since_retrain = 0
 
@@ -247,23 +275,32 @@ class RollingController:
         self._warmup_mode       = True
 
     # -------------------------------------------------------------------
-    # Feed a completed bar into the controller
+    # Feed the continuous market stream
+    # -------------------------------------------------------------------
+    
+    def add_market_bar(self, candle: dict):
+        self.market_buffer.append(candle)
+
+    # -------------------------------------------------------------------
+    # Feed a completed setup into the controller
     # -------------------------------------------------------------------
 
-    def add_bar(self, features: dict, candle: dict, atr: float):
+    def add_bar(self, features: dict, candle: dict, atr: float, market_index: int):
         """
-        Must be called once per bar with the bar's ML feature dict,
-        the raw OHLC candle dict, and the current ATR value.
+        Must be called once per setup with the bar's ML feature dict,
+        the raw OHLC candle dict, the current ATR value, and its continuous index.
         """
         self.feature_buffer.append(features)
         self.candle_buffer.append(candle)
         self.atr_buffer.append(atr)
+        self.market_indices_buffer.append(market_index)
 
-        # Trim to window size
+        # Trim to setup window size
         if len(self.feature_buffer) > self.train_window:
             self.feature_buffer.pop(0)
             self.candle_buffer.pop(0)
             self.atr_buffer.pop(0)
+            self.market_indices_buffer.pop(0)
 
         self._bars_since_retrain += 1
         if self._bars_since_retrain >= self.retrain_every:
@@ -275,20 +312,69 @@ class RollingController:
     # -------------------------------------------------------------------
 
     def _retrain(self):
-        if len(self.candle_buffer) <= LABEL_HORIZON + 10:
-            return  # not enough data yet
+        # We need enough setups AND the most recent setup must have MAX_BARS future contiguous bars to resolve
+        if not self.market_indices_buffer:
+            return
+            
+        last_market_index = self.market_indices_buffer[-1]
+        bars_available_for_last_setup = len(self.market_buffer) - last_market_index - 1
+        
+        if len(self.candle_buffer) < 100:
+            return  # not enough setup data yet
 
-        # Build label dataset (future-aware — only uses past candles for current bar)
-        df_labels = _compute_labels(self.candle_buffer, self.atr_buffer)
+        df_labels = _compute_labels(
+            self.candle_buffer, 
+            self.atr_buffer, 
+            self.market_indices_buffer, 
+            self.market_buffer
+        )
 
-        # Features up to the last labelable bar
         n_labelled = len(df_labels)
         df_features = pd.DataFrame(self.feature_buffer[:n_labelled])
 
         if df_features.empty or df_labels.empty:
             return
 
-        success = self.ai_model.train(df_features, df_labels)
+        # --- Phase 2.5 Mandatory Diagnostics ---
+        # Combine labels and features to drop NaNs
+        df_combined = pd.concat([df_features, df_labels], axis=1)
+        
+        total_signals = len(df_combined)
+        df_clean = df_combined.dropna(subset=['bias', 'env', 'cont']).copy()
+        
+        resolved_count = len(df_clean)
+        discard_count = total_signals - resolved_count
+        
+        if total_signals > 0 and not df_clean.empty and discard_count > 0:
+            print("\n" + "="*60)
+            print("🚀 PRE-TRAIN EVENT DIAGNOSTICS")
+            print("="*60)
+            print(f"Total Signals: {total_signals} | Discarded (Unresolved in {MAX_BARS} bars): {discard_count} ({discard_count/total_signals:.1%})")
+            
+            if resolved_count > 0:
+                bull_wins = len(df_clean[df_clean['bias'] == 1])
+                bear_wins = len(df_clean[df_clean['bias'] == -1])
+                whipsaws = len(df_clean[df_clean['bias'] == 0])
+                
+                print(f"Resolved: {resolved_count} | Bull Wins: {bull_wins} ({bull_wins/resolved_count:.1%}) | Bear Wins: {bear_wins} ({bear_wins/resolved_count:.1%}) | Whipsaw: {whipsaws} ({whipsaws/resolved_count:.1%})")
+                
+                # Correlations
+                df_clean['bull_event'] = (df_clean['bias'] == 1).astype(int)
+                if 'impulse_size_atr' in df_clean.columns:
+                    corr_pr = df_clean['impulse_size_atr'].corr(df_clean['bull_event'])
+                    print(f"Corr(impulse_size_atr, bull_event) : {corr_pr:.4f}")
+                if 'breakout_strength' in df_clean.columns:
+                    corr_bo = df_clean['breakout_strength'].corr(df_clean['bull_event'])
+                    print(f"Corr(breakout_strength, bull_event): {corr_bo:.4f}")
+            print("="*60 + "\n")
+
+        if df_clean.empty or len(df_clean) < 100:
+            return
+
+        df_features_clean = df_clean[df_features.columns]
+        df_labels_clean = df_clean[['bias', 'env', 'cont']]
+
+        success = self.ai_model.train(df_features_clean, df_labels_clean)
         if success:
             self._warmup_mode = False
 

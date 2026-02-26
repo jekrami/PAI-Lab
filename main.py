@@ -106,6 +106,7 @@ class PAILabEngine:
             }
 
             self.core.add_candle(candle)
+            self.controller.add_market_bar(candle)
 
             signal = self.core.detect_signal()
             if signal == "tight_trading_range" or not signal:
@@ -135,7 +136,8 @@ class PAILabEngine:
 
             # 🔹 Probability Controller: v6 uses Strategy Selector gate instead of evaluate_trade
             # --- Phase-1 v6: Feed bar into controller for labeling + training ---
-            self.controller.add_bar(features, candle, atr)
+            market_index = len(self.controller.market_buffer) - 1
+            self.controller.add_bar(features, candle, atr, market_index=market_index)
 
             # --- Phase-2 v6: Get AI Context ---
             ctx = self.controller.get_context(features)
