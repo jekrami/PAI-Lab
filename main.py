@@ -125,6 +125,10 @@ class PAILabEngine:
             risk_override      = signal.get("risk_override", None)
             pattern_type       = signal.get("type", None)
 
+            # v6.1: Disable underperforming setup types
+            if pattern_type in ("breakout", "third_entry"):
+                continue
+
             is_warmup = (idx < self.warm_up_bars)
 
             # Survival layer first (capital protection)

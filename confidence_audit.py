@@ -50,9 +50,10 @@ def run_audit():
         direction = signal.get("direction", "bullish")
         
         close_now = candle['close']
-        target_up = close_now + atr
+        # Stage-1 Pivot: 0.7 ATR target, 1 ATR stop (matches _compute_labels)
+        target_up = close_now + 0.7 * atr
         stop_up = close_now - atr
-        target_down = close_now - atr
+        target_down = close_now - 0.7 * atr
         stop_down = close_now + atr
         
         bull_event = None

@@ -35,56 +35,14 @@ def compute_stop_target(entry_price, atr, direction, signal_bar,
         (stop_price, target_price, stop_dist, target_dist)  OR  None if the
         trade is structurally unacceptable (wide stop or poor R:R).
     """
-    # Stop distance: ATR-based (proven reliable on BTC 5m)
-    # Uses ATR_STOP as the primary stop distance, with the signal bar
-    # as a minimum floor (never set a stop inside the signal bar range).
-    atr_stop_dist = ATR_STOP * atr
+    # Symmetric 0.7 ATR scalp: target and stop both 0.7 ATR (1:1 R:R)
+    stop_dist = 0.7 * atr
+    target_dist = 0.7 * atr
 
     if direction == "bullish":
-        signal_bar_stop = entry_price - signal_bar["low"]
-        stop_dist = max(atr_stop_dist, signal_bar_stop + STOP_BUFFER_ATR * atr)
         stop_price = entry_price - stop_dist
     else:
-        signal_bar_stop = signal_bar["high"] - entry_price
-        stop_dist = max(atr_stop_dist, signal_bar_stop + STOP_BUFFER_ATR * atr)
         stop_price = entry_price + stop_dist
-
-    # --- Stop Efficiency Filter (Al Brooks: Never fake the stop. If it's too wide, skip.) ---
-    # v5.0: Replaced the old artificial stop cap with a hard block.
-    # Moving the stop artificially creates a false sense of R:R. If the signal bar
-    # is too large, the trade simply does not meet risk criteria.
-    if stop_dist > 1.5 * atr:
-        return None   # Stop too wide — trade blocked
-
-    # Target: dynamic based on regime probability (0=range, 1=trend) or fallback env string
-    if regime_probability is not None:
-        # Smoothly scale between 1R (full range) and 2R (full trend)
-        target_mult = 1.0 + regime_probability * 1.0
-        target_dist = stop_dist * target_mult
-    elif env == "trading_range":
-        # Al Brooks: Buy low, sell high, and scalp holding for 1R in a trading range
-        target_dist = stop_dist * 1.0
-    else:
-        # Trend continuation expects 2R+
-        target_dist = stop_dist * RISK_REWARD_RATIO
-
-    # Measured move override: if impulse > default, use it (swing territory)
-    if asset_config and asset_config.get("target_mode") == "measured_move" and features:
-        impulse_raw = features.get("impulse_size_raw", 0)
-        if impulse_raw > target_dist:
-            # Cap swing target at SWING_RR × stop_dist
-            target_dist = min(impulse_raw, stop_dist * SWING_RR)
-
-    # Context Quality reduction override
-    if context_quality is not None and context_quality < 0.5:
-        # Minimum scalp 1R
-        scalp_target = stop_dist * 1.0
-        target_dist = min(target_dist, scalp_target)
-
-    # --- R:R Efficiency Check ---
-    expected_rr = target_dist / stop_dist if stop_dist > 0 else 0
-    if expected_rr < 1.0:
-        return None   # R:R too poor — trade blocked
 
     if direction == "bullish":
         target_price = entry_price + target_dist

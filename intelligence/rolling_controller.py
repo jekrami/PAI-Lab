@@ -58,10 +58,11 @@ def _compute_labels(candles: list, atr_series: list, market_indices: list, marke
         close_now = candles[i]['close']
         atr = atr_series[i] if atr_series[i] > 0 else 1.0
         
-        target_up = close_now + atr
+        # Stage-1 Pivot: Scalp objective — 0.7 ATR target, 1 ATR stop (asymmetric)
+        target_up = close_now + 0.7 * atr
         stop_up   = close_now - atr
-        
-        target_down = close_now - atr
+
+        target_down = close_now - 0.7 * atr
         stop_down   = close_now + atr
         
         bull_event = None
