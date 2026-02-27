@@ -62,6 +62,28 @@ def load_regime_events():
         return pd.DataFrame()
 
 
+def load_context():
+    """Load AI context data"""
+    try:
+        f = LOGS_DIR / "ai_context.csv"
+        if f.exists():
+            return pd.read_csv(f)
+        return pd.DataFrame()
+    except Exception as e:
+        return pd.DataFrame()
+
+
+def load_backtest_trades():
+    """Load backtest trades data"""
+    try:
+        f = LOGS_DIR / "trades.csv"
+        if f.exists():
+            return pd.read_csv(f)
+        return pd.DataFrame()
+    except Exception as e:
+        return pd.DataFrame()
+
+
 def get_system_health():
     """Get system health status"""
     try:
@@ -185,6 +207,74 @@ def get_recent_trades(limit=20):
     return display_df.iloc[::-1]  # Reverse to show newest first
 
 
+def get_bt_trades(limit=50):
+    """Get backtest trades as formatted table"""
+    trades = load_backtest_trades()
+    
+    if trades.empty:
+        return pd.DataFrame({"Time": ["No trades yet"], "Direction": ["-"], "Entry": ["-"], "Exit": ["-"], "Outcome": ["-"], "Equity": ["-"]})
+    
+    recent = trades.tail(limit).copy()
+    display_df = pd.DataFrame()
+    
+    if 'entry_time' in recent.columns:
+        display_df['Time'] = pd.to_datetime(recent['entry_time'], errors='coerce').dt.strftime('%m-%d %H:%M')
+    
+    if 'direction' in recent.columns:
+        display_df['Direction'] = recent['direction'].apply(
+            lambda x: f"🟢 {x.upper()}" if x == 'bullish' else f"🔴 {x.upper()}"
+        )
+    
+    if 'entry_price' in recent.columns:
+        display_df['Entry'] = recent['entry_price'].round(2)
+    
+    if 'exit_price' in recent.columns:
+        display_df['Exit'] = recent['exit_price'].apply(
+            lambda x: f"{x:.2f}" if pd.notna(x) and str(x).strip() != '' else "OPEN"
+        )
+    
+    if 'outcome' in recent.columns:
+        display_df['Outcome'] = recent['outcome'].apply(
+            lambda x: "✅ WIN" if x == 1 else ("❌ LOSS" if x == 0 else "-")
+        )
+    
+    if 'equity_after' in recent.columns:
+        display_df['Equity'] = recent['equity_after'].round(2)
+    
+    return display_df.iloc[::-1]
+
+
+def get_context_table(limit=50):
+    """Get formatted AI context table"""
+    ctx_df = load_context()
+    if ctx_df.empty:
+        return pd.DataFrame({"Time": ["No data"], "Strategy": ["-"], "Regime": ["-"], "Confidence": ["-"], "Decision": ["-"]})
+    
+    recent = ctx_df.tail(limit).copy()
+    display_df = pd.DataFrame()
+    
+    if 'bar_time' in recent.columns:
+        display_df['Time'] = pd.to_datetime(recent['bar_time'], errors='coerce').dt.strftime('%m-%d %H:%M')
+    
+    if 'selected_strategy' in recent.columns:
+        display_df['Strategy'] = recent['selected_strategy']
+        
+    if 'ai_env' in recent.columns and 'ai_bias' in recent.columns:
+        display_df['Regime'] = recent['ai_env'] + " (" + recent['ai_bias'] + ")"
+        
+    if 'ai_confidence' in recent.columns:
+        display_df['Confidence'] = recent['ai_confidence'].round(2)
+        
+    if 'blocked_by_constraint' in recent.columns and 'constraint_reason' in recent.columns:
+        display_df['Decision'] = recent.apply(
+            lambda x: f"🔴 BLOCKED: {x['constraint_reason']}" if str(x['blocked_by_constraint']).lower() == 'true' else "🟢 EXECUTED", axis=1
+        )
+        
+    return display_df.iloc[::-1]
+
+
+
+
 def get_current_position():
     """Get current position status"""
     trades = load_trades()
@@ -255,9 +345,12 @@ def refresh_dashboard():
     # Equity curve
     equity_plot = plot_equity_curve()
     
-    # Recent trades
-    trades_table = get_recent_trades(20)
+    # Recent context logic
+    context_table = get_context_table(50)
     
+    # Backtest trades
+    bt_table = get_bt_trades(50)
+
     # Current position
     pos_status, pos_entry, pos_size, pos_time, pos_note = get_current_position()
     position_info = f"""
@@ -301,7 +394,9 @@ def refresh_dashboard():
         position_info,
         regime_info,
         risk_info,
-        health_info
+        health_info,
+        context_table,
+        bt_table
     )
 
 
@@ -325,38 +420,58 @@ with gr.Blocks(title="PAI-Lab Live Monitor") as demo:
             scale=2
         )
     
-    with gr.Row():
-        with gr.Column(scale=2):
-            equity_plot = gr.Plot(label="Equity Curve")
-        
-        with gr.Column(scale=1):
-            position_md = gr.Markdown(value="Loading...")
-            regime_md = gr.Markdown(value="Loading...")
-    
-    with gr.Row():
-        with gr.Column(scale=2):
-            trades_table = gr.Dataframe(
-                headers=["Time", "Direction", "Entry", "Exit", "Outcome", "Equity"],
-                label="Recent Trades (Latest First)",
+    with gr.Tabs():
+        with gr.Tab("Dashboard (Live)"):
+            with gr.Row():
+                with gr.Column(scale=2):
+                    equity_plot = gr.Plot(label="Equity Curve")
+                
+                with gr.Column(scale=1):
+                    position_md = gr.Markdown(value="Loading...")
+                    regime_md = gr.Markdown(value="Loading...")
+            
+            with gr.Row():
+                with gr.Column(scale=2):
+                    trades_table = gr.Dataframe(
+                        headers=["Time", "Direction", "Entry", "Exit", "Outcome", "Equity"],
+                        label="Recent Live Trades (Latest First)",
+                        wrap=True
+                    )
+                
+                with gr.Column(scale=1):
+                    risk_md = gr.Markdown(value="Loading...")
+                    health_md = gr.Markdown(value="Loading...")
+                    
+        with gr.Tab("AI Decisions (Why?)"):
+            context_table = gr.Dataframe(
+                headers=["Time", "Strategy", "Regime", "Confidence", "Decision"],
+                label="AI Context & Gate Decisions (Recent Setups)",
                 wrap=True
             )
-        
-        with gr.Column(scale=1):
-            risk_md = gr.Markdown(value="Loading...")
-            health_md = gr.Markdown(value="Loading...")
+            
+        with gr.Tab("Backtest Ledger"):
+            bt_trades_table = gr.Dataframe(
+                headers=["Time", "Direction", "Entry", "Exit", "Outcome", "Equity"],
+                label="Backtest Trades (Latest First)",
+                wrap=True
+            )
+    
+    outputs_list = [
+        equity_plot, trades_table, position_md, regime_md, risk_md, health_md, context_table, bt_trades_table
+    ]
     
     # Manual refresh button
     refresh_btn.click(
         fn=refresh_dashboard,
         inputs=[],
-        outputs=[equity_plot, trades_table, position_md, regime_md, risk_md, health_md]
+        outputs=outputs_list
     )
     
     # Initial load
     demo.load(
         fn=refresh_dashboard,
         inputs=[],
-        outputs=[equity_plot, trades_table, position_md, regime_md, risk_md, health_md]
+        outputs=outputs_list
     )
 
 

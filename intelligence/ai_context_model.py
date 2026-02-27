@@ -1,10 +1,11 @@
-# 2026-02-26 | Phase-2 v6 | AI Context Model (selective gating) | Writer: J.Ekrami | Co-writer: Antigravity
-# v6.1.0
+# 2026-02-27 | Phase-2 v6.1 | AI Context Model Calibration | Writer: J.Ekrami | Co-writer: Antigravity
+# v6.2.0
 """
 Standalone AI module for regime context prediction.
 Responsibilities:
-    - Define and train the LightGBM/RandomForest classifiers
+    - Define, train, and calibrate the LightGBM/RandomForest classifiers
     - Predict bull_prob, bear_prob, trend_prob, continuation_prob
+    - Use Platt Scaling (sigmoid) to guarantee monotonic probability calibrations
     - Handle model persistence & feature scaling
     - No training orchestration here (that is rolling_controller.py)
 """
@@ -13,6 +14,8 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
+from sklearn.calibration import CalibratedClassifierCV
+import joblib
 
 # Optional: Use LightGBM if installed.
 try:
@@ -36,17 +39,22 @@ class AIContextModel:
     def __init__(self):
         if _USE_LGBM:
             # LightGBM — preferred for speed and accuracy on tabular data
-            self.model_bias = LGBMClassifier(n_estimators=100, max_depth=5, learning_rate=0.1,
+            base_bias = LGBMClassifier(n_estimators=100, max_depth=5, learning_rate=0.1,
                                              verbose=-1, random_state=42)
-            self.model_env  = LGBMClassifier(n_estimators=100, max_depth=5, learning_rate=0.1,
+            base_env  = LGBMClassifier(n_estimators=100, max_depth=5, learning_rate=0.1,
                                              verbose=-1, random_state=42)
-            self.model_cont = LGBMClassifier(n_estimators=100, max_depth=5, learning_rate=0.1,
+            base_cont = LGBMClassifier(n_estimators=100, max_depth=5, learning_rate=0.1,
                                              verbose=-1, random_state=42)
         else:
             # RandomForest baseline if LightGBM not installed
-            self.model_bias = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42, n_jobs=-1)
-            self.model_env  = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42, n_jobs=-1)
-            self.model_cont = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42, n_jobs=-1)
+            base_bias = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42, n_jobs=-1)
+            base_env  = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42, n_jobs=-1)
+            base_cont = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42, n_jobs=-1)
+
+        # Apply Platt Scaling via CalibratedClassifierCV for monotonic probability mapping
+        self.model_bias = CalibratedClassifierCV(base_bias, method='sigmoid', cv=5)
+        self.model_env  = CalibratedClassifierCV(base_env, method='sigmoid', cv=5)
+        self.model_cont = CalibratedClassifierCV(base_cont, method='sigmoid', cv=5)
 
         self.scaler = StandardScaler()
         self.is_trained = False
@@ -145,3 +153,26 @@ class AIContextModel:
             "environment":        environment
         }
         return dict(self.last_context)
+
+    def save(self, model_path: str, scaler_path: str):
+        """Saves the trained model and scaler to disk."""
+        if not self.is_trained:
+            raise RuntimeError("Cannot save an untrained model.")
+        
+        models = {
+            "bias": self.model_bias,
+            "env": self.model_env,
+            "cont": self.model_cont
+        }
+        joblib.dump(models, model_path)
+        joblib.dump(self.scaler, scaler_path)
+
+    def load(self, model_path: str, scaler_path: str):
+        """Loads the trained model and scaler from disk."""
+        models = joblib.load(model_path)
+        self.model_bias = models["bias"]
+        self.model_env = models["env"]
+        self.model_cont = models["cont"]
+        
+        self.scaler = joblib.load(scaler_path)
+        self.is_trained = True

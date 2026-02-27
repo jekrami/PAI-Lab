@@ -18,6 +18,7 @@ import re
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 from engine.core_engine import CoreEngine
+from engine.sandbox import SimulationSandbox
 from execution.resolvers import LiveResolver
 from intelligence.rolling_controller import RollingController
 from execution.regime_guard import RegimeGuard
@@ -54,6 +55,7 @@ def _is_within_session(dt_utc, session_str):
 
 core = CoreEngine()
 resolver = LiveResolver()
+sandbox = SimulationSandbox(n_iterations=1000, max_path_length=50)
 controller = RollingController(train_window=300, retrain_every=50)
 regime = RegimeGuard()
 risk = RiskManager()
@@ -65,7 +67,8 @@ logger = TelemetryLogger(
     trades_path="logs/live_trades.csv",
 )
 
-paper_equity = 0.0
+paper_equity = 100.0  # Base logic uses 100 for percentage
+paper_equity_series = [paper_equity]
 
 print("Initializing from Binance history...")
 
@@ -92,40 +95,28 @@ last_processed_time = None
 while True:
 
     try:
-        candle = feed.get_latest_closed_candle()
+        candle_1m = feed.get_latest_closed_candle(interval="1m")
     except Exception as e:
-        print(f"[LIVE] Error fetching latest candle: {e}")
+        print(f"[LIVE] Error fetching latest 1m candle: {e}")
         time.sleep(15)
         continue
 
-    if not candle:
-        print("[LIVE] No closed candle available yet. Sleeping...")
+    if not candle_1m:
+        print("[LIVE] No closed 1m candle available yet. Sleeping...")
         time.sleep(10)
         continue
 
-    if candle["open_time"] != last_processed_time:
+    if candle_1m["open_time"] != last_processed_time:
+        last_processed_time = candle_1m["open_time"]
+        
+        # Determine UTC time
+        candle_dt = candle_1m.get("open_time")
+        dt_utc = datetime.fromtimestamp(candle_dt / 1000, timezone.utc)
 
-        last_processed_time = candle["open_time"]
+        # 1. Provide 1m candle to the Resolver for micro-entry scans and trade management
+        outcome, pos_info = resolver.update(candle_1m)
 
-        print(f"\nNew CLOSED candle @ {candle['open_time']} | Close: {candle['close']}")
 
-        core.add_candle({
-            "time": candle["open_time"],
-            "open": candle["open"],
-            "high": candle["high"],
-            "low": candle["low"],
-            "close": candle["close"],
-        })
-        controller.add_market_bar(candle)
-
-        outcome, pos_info = resolver.update(candle)
-
-        # Ensure we have a valid UTC datetime to pass to risk manager
-        candle_dt = candle.get("open_time") or candle.get("time")
-        if isinstance(candle_dt, (int, float)):
-            dt_utc = datetime.fromtimestamp(candle_dt / 1000, timezone.utc)
-        else:
-            dt_utc = candle_dt
 
         if outcome is not None and pos_info is not None:
             # Normalize trade return to ATR units for risk/regime tracking
@@ -133,8 +124,15 @@ while True:
             target_d = pos_info.get("target_dist", 2.0)
             atr_est = stop_d  # fallback: assume stop ≈ 1 ATR
             trade_return = (target_d / atr_est) if outcome == 1 else -(stop_d / atr_est)
+            # Paper equity update (scaled by position size)
+            size = pos_info.get("size", 1.0)
+            equity_before = paper_equity
+            paper_equity = paper_equity + trade_return * size
+            paper_equity_series.append(paper_equity)
+            equity_after = paper_equity
+
             regime.update(trade_return)
-            risk.update(trade_return, [paper_equity], current_time=dt_utc)
+            risk.update(trade_return, paper_equity_series, current_time=dt_utc)
 
             used_features = pos_info.get("features")
 
@@ -147,11 +145,7 @@ while True:
             if setup_type:
                 controller.update_pattern_memory(setup_type, outcome)
 
-            # Paper equity update (scaled by position size)
-            size = pos_info.get("size", 1.0)
-            equity_before = paper_equity
-            paper_equity = paper_equity + trade_return * size
-            equity_after = paper_equity
+            # Phase-2/3 Setup logging handled above
 
             # --- Phase-2: Get AI context probabilities for logging ---
             ai_context = controller.get_context(used_features) if used_features else {}
@@ -165,8 +159,8 @@ while True:
                 decision="exit",
                 entry_time=pos_info.get("entry_time"),
                 entry_price=pos_info.get("entry"),
-                exit_time=candle["open_time"],
-                exit_price=candle["close"],
+                exit_time=candle_1m["open_time"],
+                exit_price=candle_1m["close"],
                 size=size,
                 atr=None,
                 outcome=outcome,
@@ -189,14 +183,30 @@ while True:
             continue
 
         # --- Session Window Enforcement ---
-        candle_time = candle.get("open_time") or candle.get("time")
-        if candle_time is not None:
-            if isinstance(candle_time, (int, float)):
-                dt_utc = datetime.fromtimestamp(candle_time / 1000, timezone.utc)
-            else:
-                dt_utc = candle_time
-            if not _is_within_session(dt_utc, ASSET_CONFIG.get("session", "24/7")):
+        if not _is_within_session(dt_utc, ASSET_CONFIG.get("session", "24/7")):
+            continue
+
+        # 2. Check if a 5-minute boundary was just crossed 
+        # (e.g., if the 1m candle that just closed was the 04:00-04:59 minute, closing exactly at 05:00)
+        # In Binance, the 1m candle at '04' closes at '05'. So dt_utc.minute % 5 == 4 means the 5m candle just finished.
+        if dt_utc.minute % 5 != 4:
+            continue
+            
+        print(f"\n[LIVE] 5-minute interval complete at {dt_utc.strftime('%H:%M')}. Fetching 5m candle...")
+        
+        # Give Binance API an extra second to index the 5m candle properly
+        time.sleep(1.5)
+        try:
+            candle = feed.get_latest_closed_candle(interval="5m")
+            if not candle:
                 continue
+            # Ensure "time" key exists for Al Brooks detectors
+            candle["time"] = candle["open_time"]
+        except Exception as e:
+            print(f"[LIVE] Error fetching 5m candle: {e}")
+            continue
+            
+        core.add_candle(candle)
 
         signal = core.detect_signal()
         if signal == "tight_trading_range" or not signal:
@@ -246,13 +256,37 @@ while True:
         # Compute stop distance for position sizing
         from execution.resolvers import compute_stop_target
         direction = signal.get("direction", "bullish") if isinstance(signal, dict) else "bullish"
-        _, _, stop_dist, _ = compute_stop_target(
+        _, _, stop_dist, target_dist = compute_stop_target(
             entry_price, atr, direction, signal_bar,
             asset_config=ASSET_CONFIG, features=features, env=env
         )
 
-        # Position size: risk exactly 1% (or 0.3%) of account
-        position_size = position_sizer.size(stop_dist, [paper_equity], tough_mode=tough_mode)
+        # -------------------------------------------------
+        # Phase 1: Local Synthetic Backtest (Simulation Sandbox)
+        # -------------------------------------------------
+        mem_data = core.memory.data()
+        if len(mem_data) > 0:
+            mem_df = pd.DataFrame(mem_data)
+            lsb_result = sandbox.evaluate(
+                memory_df=mem_df,
+                signal_context=signal,
+                entry_price=entry_price,
+                stop_dist=stop_dist,
+                target_dist=target_dist
+            )
+            if not lsb_result["approved"]:
+                print(f"[Phase-1 LSB] Trade blocked: Pp={lsb_result['pp']:.2f}, EV={lsb_result['ev']:.2f}")
+                continue
+
+        # V8 Phase 3: The Governor layer
+        observation_mode = risk.is_observation_mode()
+        position_size = position_sizer.size(
+            stop_dist, 
+            paper_equity_series, 
+            tough_mode=tough_mode,
+            ai_confidence=confidence,
+            observation_mode=observation_mode
+        )
 
         # Store ai_env in the position so it can be recovered on trade close
         resolver.open_position(

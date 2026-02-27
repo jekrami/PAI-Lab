@@ -16,19 +16,18 @@ import time
 
 class BinanceLiveFeed:
 
-    def __init__(self, symbol="BTCUSDT", interval="5m"):
+    def __init__(self, symbol="BTCUSDT"):
         self.symbol = symbol
-        self.interval = interval
         self.base_url = "https://data-api.binance.vision/api/v3/klines"
 
     # -------------------------------------------------
     # Fetch last N historical closed candles
     # -------------------------------------------------
 
-    def get_historical_candles(self, limit=200):
+    def get_historical_candles(self, interval="5m", limit=200):
         params = {
             "symbol": self.symbol,
-            "interval": self.interval,
+            "interval": interval,
             "limit": limit,
         }
 
@@ -57,10 +56,10 @@ class BinanceLiveFeed:
     # Fetch latest closed candle
     # -------------------------------------------------
 
-    def get_latest_closed_candle(self):
+    def get_latest_closed_candle(self, interval="5m"):
         params = {
             "symbol": self.symbol,
-            "interval": self.interval,
+            "interval": interval,
             "limit": 2,
         }
 

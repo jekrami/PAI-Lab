@@ -35,9 +35,34 @@ def compute_stop_target(entry_price, atr, direction, signal_bar,
         (stop_price, target_price, stop_dist, target_dist)  OR  None if the
         trade is structurally unacceptable (wide stop or poor R:R).
     """
-    # Symmetric 0.7 ATR scalp: target and stop both 0.7 ATR (1:1 R:R)
-    stop_dist = 0.7 * atr
-    target_dist = 0.7 * atr
+    # V8 Phase 2: Dynamic Stop Sizing and Measured Move Targets
+    if features:
+        vol_ratio = features.get("volatility_ratio", 1.0)
+        impulse_raw = features.get("impulse_size_raw", 1.0 * atr)
+
+        # "Vickiness" / Expanding Volatility Check
+        if vol_ratio > 1.2:
+            # Widen stop to prior structural leg (Measured Move basis)
+            stop_dist = max(1.0 * atr, impulse_raw)
+        else:
+            # Native signal bar geometry
+            if direction == "bullish":
+                stop_dist = entry_price - signal_bar["low"]
+            else:
+                stop_dist = signal_bar["high"] - entry_price
+            stop_dist = max(stop_dist, 0.5 * atr)
+
+        # Target shifted to Measured Move structural basis
+        target_dist = impulse_raw
+
+        # Regime Scaling
+        prob_scalar = regime_probability if regime_probability is not None else 0.5
+        regime_min_target = stop_dist * (1.0 + prob_scalar)  # Scaled 1R to 2R
+        target_dist = max(target_dist, regime_min_target)
+    else:
+        # Fallback if no features provided
+        stop_dist = 1.0 * atr
+        target_dist = 2.0 * atr
 
     if direction == "bullish":
         stop_price = entry_price - stop_dist
@@ -61,15 +86,16 @@ class BacktestResolver:
     def __init__(self, df):
         self.df = df
 
-    def resolve(self, entry_price, atr, idx, direction="bullish",
+    def resolve(self, entry_price, atr, current_time, direction="bullish",
                 features=None, asset_config=None, signal_bar=None, env=None,
                 regime_probability=None):
         """
         Resolve trade outcome using Al Brooks 2R logic.
 
         Args:
+            current_time: The timestamp of the bar to start looking forward from.
             signal_bar: dict with high/low/open/close of the signal bar.
-                       If None, falls back to the candle at idx.
+                        If None, falls back to the candle at current_time.
         
         Returns:
             (outcome, stop_dist, target_dist)
@@ -78,13 +104,56 @@ class BacktestResolver:
         """
         # Build signal bar from dataframe if not provided
         if signal_bar is None:
-            row = self.df.iloc[idx]
-            signal_bar = {
-                "high": row["high"],
-                "low": row["low"],
-                "open": row["open"],
-                "close": row["close"],
-            }
+            if current_time in self.df.index:
+                row = self.df.loc[current_time]
+                signal_bar = {
+                    "high": row["high"],
+                    "low": row["low"],
+                    "open": row["open"],
+                    "close": row["close"],
+                }
+            else:
+                return None, 0, 0
+
+        # --- Micro-Entry Refinement (1m H2/L2) ---
+        # Scan the next 15 bars (minutes) for an H2/L2 micro-pullback confirmation
+        try:
+            wait_df = self.df.loc[current_time:].iloc[1:16]
+        except KeyError:
+            return None, 0, 0
+            
+        micro_entry_price = None
+        h_count, l_count = 0, 0
+        prev_high, prev_low = None, None
+        
+        for _, wait_row in wait_df.iterrows():
+            if prev_high is None:
+                prev_high = wait_row["high"]
+                prev_low = wait_row["low"]
+                continue
+                
+            if direction == "bullish":
+                if wait_row["high"] > prev_high:
+                    h_count += 1
+                    if h_count == 2:  # H2 triggered
+                        micro_entry_price = wait_row["high"]
+                        break
+            else:
+                if wait_row["low"] < prev_low:
+                    l_count += 1
+                    if l_count == 2:  # L2 triggered
+                        micro_entry_price = wait_row["low"]
+                        break
+            
+            prev_high = wait_row["high"]
+            prev_low = wait_row["low"]
+            
+        if micro_entry_price is None:
+            # Trade scratched, no H2/L2 confirmation within 15 minutes
+            return None, 0, 0
+            
+        # Refined Entry!
+        entry_price = micro_entry_price
 
         result = compute_stop_target(
             entry_price, atr, direction, signal_bar,
@@ -96,12 +165,14 @@ class BacktestResolver:
 
         stop_price, target_price, stop_dist, target_dist = result
 
-        for j in range(1, 31):
-
-            if idx + j >= len(self.df):
-                break
-
-            future = self.df.iloc[idx + j]
+        # Get forward slice (e.g., next 150 minutes, since 30 5m bars = 150 minutes)
+        # Assuming df is indexed by time and sorted
+        try:
+            forward_df = self.df.loc[current_time:].iloc[1:151] # Next 150 bars max
+        except KeyError:
+            return None, stop_dist, target_dist
+            
+        for _, future in forward_df.iterrows():
 
             if direction == "bullish":
                 if future["high"] - entry_price >= target_dist:
@@ -125,28 +196,50 @@ class LiveResolver:
 
     def __init__(self):
         self.position = None  # single-position model
-
+        self.pending_entry = None  # tracks pending 1m micro-entries
+        
     def has_open_position(self):
-        return self.position is not None
+        return self.position is not None or self.pending_entry is not None
 
     def open_position(self, entry_price, atr, features, direction, size, entry_time,
                       asset_config=None, context_quality=None, signal_bar=None, env=None,
                       regime_probability=None):
 
-        # Build a pseudo signal bar if not provided
+        self.pending_entry = {
+            "entry_price": entry_price,
+            "atr": atr,
+            "features": features,
+            "direction": direction,
+            "size": size,
+            "entry_time": entry_time,
+            "asset_config": asset_config,
+            "context_quality": context_quality,
+            "signal_bar": signal_bar,
+            "env": env,
+            "regime_probability": regime_probability,
+            "wait_bars": 0,
+            "h_count": 0,
+            "l_count": 0,
+            "prev_high": None,
+            "prev_low": None
+        }
+        print(f"[LIVE] Pending micro-entry scanning started for {direction.upper()}...")
+
+    def _execute_entry(self, entry_price, pe):
+        signal_bar = pe["signal_bar"]
         if signal_bar is None:
             signal_bar = {
-                "high": entry_price + 0.5 * atr,
-                "low": entry_price - 0.5 * atr,
+                "high": entry_price + 0.5 * pe["atr"],
+                "low": entry_price - 0.5 * pe["atr"],
                 "open": entry_price,
                 "close": entry_price,
             }
 
         result = compute_stop_target(
-            entry_price, atr, direction, signal_bar,
-            asset_config=asset_config, features=features,
-            context_quality=context_quality, env=env,
-            regime_probability=regime_probability
+            entry_price, pe["atr"], pe["direction"], signal_bar,
+            asset_config=pe["asset_config"], features=pe["features"],
+            context_quality=pe["context_quality"], env=pe["env"],
+            regime_probability=pe["regime_probability"]
         )
         if result is None:
             return False   # stop too wide or R:R too poor
@@ -156,27 +249,59 @@ class LiveResolver:
         self.position = {
             "entry": entry_price,
             "stop": stop_price,
-            "initial_stop": stop_price,       # remember original stop for trailing
+            "initial_stop": stop_price,
             "target": target_price,
             "stop_dist": stop_dist,
             "target_dist": target_dist,
-            "features": features,
-            "direction": direction,
-            "size": size,
-            "remaining_size": size,            # for partial exits
-            "entry_time": entry_time,
-            "asset_config": asset_config or {},
+            "features": pe["features"],
+            "direction": pe["direction"],
+            "size": pe["size"],
+            "remaining_size": pe["size"],
+            "entry_time": pe["entry_time"],
+            "asset_config": pe["asset_config"] or {},
             "bars_since_entry": 0,
             "partial_taken": False,
             "trail_activated": False,
         }
 
         rr = target_dist / stop_dist if stop_dist > 0 else 0
-        print(f"[LIVE] {direction.upper()} position opened @ {entry_price} | "
+        print(f"[LIVE] {pe['direction'].upper()} micro-entry filled @ {entry_price} | "
               f"Target: {target_price:.2f} | Stop: {stop_price:.2f} | "
-              f"R:R = {rr:.1f}:1 | Size: {size:.4f}")
+              f"R:R = {rr:.1f}:1 | Size: {pe['size']:.4f}")
 
     def update(self, candle):
+        if self.pending_entry:
+            pe = self.pending_entry
+            pe["wait_bars"] += 1
+            
+            if pe["prev_high"] is None:
+                pe["prev_high"] = candle["high"]
+                pe["prev_low"] = candle["low"]
+                return None, None
+                
+            micro_entry_price = None
+            if pe["direction"] == "bullish":
+                if candle["high"] > pe["prev_high"]:
+                    pe["h_count"] += 1
+                    if pe["h_count"] == 2:
+                        micro_entry_price = candle["high"]
+            else:
+                if candle["low"] < pe["prev_low"]:
+                    pe["l_count"] += 1
+                    if pe["l_count"] == 2:
+                        micro_entry_price = candle["low"]
+                        
+            pe["prev_high"] = candle["high"]
+            pe["prev_low"] = candle["low"]
+            
+            if micro_entry_price is not None:
+                self._execute_entry(micro_entry_price, pe)
+                self.pending_entry = None
+            elif pe["wait_bars"] >= 15:
+                print(f"[LIVE] Pending {pe['direction']} entry scratched (No H2/L2 in 15m)")
+                self.pending_entry = None
+                
+            return None, None
 
         if not self.position:
             return None, None

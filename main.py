@@ -42,6 +42,7 @@ from execution.resolvers import BacktestResolver
 # These come from your existing validated modules
 
 from engine.core_engine import CoreEngine
+from engine.sandbox import SimulationSandbox
 
 
 # =====================================================
@@ -50,12 +51,31 @@ from engine.core_engine import CoreEngine
 
 class PAILabEngine:
 
-    def __init__(self, data_path, asset_id=DEFAULT_ASSET, warm_up_bars: int = 40000):
+    def __init__(self, data_path_prefix, asset_id=DEFAULT_ASSET, warm_up_bars: int = 40000):
         self.asset_id = asset_id
         self.asset_config = ASSETS.get(asset_id, ASSETS[DEFAULT_ASSET])
         self.warm_up_bars = warm_up_bars
-        self.df = pd.read_csv(data_path, parse_dates=["open_time"])
-        #self.memory = MarketMemory(maxlen=100)
+        
+        # Load multiple timeframes
+        print("Loading multi-timeframe datasets...")
+        self.dfs = {}
+        for interval in ["1m", "5m", "15m", "1h"]:
+            path = f"{data_path_prefix}_{interval}.csv"
+            if os.path.exists(path):
+                self.dfs[interval] = pd.read_csv(path, parse_dates=["open_time"]).set_index("open_time").sort_index()
+                print(f" Loaded {interval}: {len(self.dfs[interval])} bars")
+            else:
+                raise FileNotFoundError(f"Missing required timeframe data: {path}")
+                
+        # Find intersecting time bounds
+        start_time = max(df.index.min() for df in self.dfs.values())
+        end_time = min(df.index.max() for df in self.dfs.values())
+        print(f"Aligning timeframes from {start_time} to {end_time}")
+        
+        # Trim all to intersection bounds
+        for interval in self.dfs:
+            self.dfs[interval] = self.dfs[interval].loc[start_time:end_time]
+
         self.core = CoreEngine()
 
         self.controller = RollingController(train_window=300, retrain_every=50)
@@ -66,7 +86,8 @@ class PAILabEngine:
         self.last_index = 0
         self.state_manager.load(self)
         self.risk_manager = RiskManager()
-        self.resolver = BacktestResolver(self.df)
+        self.resolver = BacktestResolver(self.dfs["1m"])
+        self.sandbox = SimulationSandbox(n_iterations=1000, max_path_length=50)
 
         # Position sizing
         self.position_sizer = PositionSizer()
@@ -86,23 +107,54 @@ class PAILabEngine:
 
     def run(self):
 
-        print("Starting live simulation...\n")
+        print("Starting MTF live simulation...\n")
 
-        for idx, row_dict in enumerate(self.df.to_dict(orient="records")):
+        # Master Iterator is the 1m chart (highest temporal resolution)
+        df_1m = self.dfs["1m"]
+        
+        # Keep track of the last processed indices for higher timeframes
+        last_5m_idx = 0
+        df_5m = self.dfs["5m"]
+        df_5m_times = df_5m.index.values
+
+        for idx, (current_time, row_1m) in enumerate(df_1m.iterrows()):
             if idx < self.last_index: # Skip already processed rows if state was loaded
                 continue
 
-            row = pd.Series(row_dict) # Convert dict back to Series for consistent access
-
             # Mark warmup mode on controller to suppress console print noise
             self.controller._warmup_mode = (idx < self.warm_up_bars)
+            is_warmup = (idx < self.warm_up_bars)
+
+            # --- MTF Synchronization Step ---
+            # Wait for the next 5m bar to close.
+            # A 5m bar that opens at 00:00 closes at 00:04:59.
+            # So it becomes fully formed/closed at 00:05.
+            # Thus, we process the 5m bar opening at 00:00 when the 1m loop hits 00:05.
+            
+            # Find if there is a 5m bar that just closed exactly at `current_time`
+            time_val = current_time.to_numpy()
+            
+            # Since Pandas indexes are arrays, we check if current_time corresponds to a 5m closing boundary
+            # The 5m candle that "closed" at current_time is the one that opened 5 minutes ago
+            candle_open_time = current_time - pd.Timedelta(minutes=5)
+            
+            # For simplicity in this backtest step, we process signals precisely when the 5m candle closes.
+            # Meaning we only run the heavy feature generation on the 5m boundary.
+            if current_time.minute % 5 != 0:
+                continue
+
+            # Ensure the 5m candle actually exists in our dataset
+            if candle_open_time not in df_5m.index:
+                continue
+
+            row_5m = df_5m.loc[candle_open_time]
 
             candle = {
-                "time": row["open_time"],
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
+                "time": candle_open_time,
+                "open": float(row_5m["open"]),
+                "high": float(row_5m["high"]),
+                "low": float(row_5m["low"]),
+                "close": float(row_5m["close"]),
             }
 
             self.core.add_candle(candle)
@@ -130,12 +182,16 @@ class PAILabEngine:
                 continue
 
             is_warmup = (idx < self.warm_up_bars)
+            if not is_warmup:
+                print(f"[{candle_open_time}] Signal: {pattern_type}")
 
             # Survival layer first (capital protection)
-            if not is_warmup and not self.risk_manager.allow_trading(current_time=row["open_time"]):
+            if not is_warmup and not self.risk_manager.allow_trading(current_time=candle_open_time):
+                #print("RiskManager blocked")
                 continue
             # Then regime guard (statistical weakness)
             if not is_warmup and not self.regime_guard.allow_trading():
+                #print("RegimeGuard blocked")
                 continue
 
             # 🔹 Probability Controller: v6 uses Strategy Selector gate instead of evaluate_trade
@@ -180,18 +236,18 @@ class PAILabEngine:
             #   Bullish → enter at signal bar high (breakout above)
             #   Bearish → enter at signal bar low (breakdown below)
             direction = signal.get("direction", "bullish")
-            entry_price = row["high"] if direction == "bullish" else row["low"]
+            entry_price = float(row_5m["high"]) if direction == "bullish" else float(row_5m["low"])
 
             # Build signal bar for stop placement
             signal_bar = {
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "open": float(row["open"]),
-                "close": float(row["close"]),
+                "high": float(row_5m["high"]),
+                "low": float(row_5m["low"]),
+                "open": float(row_5m["open"]),
+                "close": float(row_5m["close"]),
             }
 
             result = self.resolver.resolve(
-                entry_price, atr, idx,
+                entry_price, atr, current_time,
                 direction=signal.get("direction", "bullish"),
                 features=features,
                 asset_config=self.asset_config,
@@ -204,6 +260,35 @@ class PAILabEngine:
 
             if outcome is None:
                 continue
+
+            # -------------------------------------------------
+            # Phase 1: Local Synthetic Backtest (Simulation Sandbox)
+            # -------------------------------------------------
+            if not is_warmup:
+                # Get the last 500 bars context (or as much as available)
+                memory_data = self.core.memory.data()
+                if len(memory_data) > 0:
+                    mem_df = pd.DataFrame(memory_data)
+                    lsb_result = self.sandbox.evaluate(
+                        memory_df=mem_df,
+                        signal_context=signal,
+                        entry_price=entry_price,
+                        stop_dist=stop_dist,
+                        target_dist=target_dist
+                    )
+                    if not lsb_result["approved"]:
+                        self.logger.log_context(
+                            bar_time              = candle["time"],
+                            ai_bias               = ai_bias,
+                            ai_env                = ai_env,
+                            ai_cont_prob          = ai_cont_prob,
+                            ai_confidence         = ai_confidence,
+                            selected_strategy     = pattern_type,
+                            blocked_by_constraint = True,
+                            constraint_reason     = f"LSB Failed (Pp={lsb_result['pp']:.2f}, EV={lsb_result['ev']:.2f})",
+                            final_execution       = False
+                        )
+                        continue
 
             # -------------------------------------------------
             # Trade Executed — Dynamic R:R
@@ -229,15 +314,24 @@ class PAILabEngine:
             if is_suboptimal or force_scalp:
                 tough_mode = True  # force reduced risk for suboptimal/volatility-shock context
 
+            # V8 Phase 3: The Governor layer
+            observation_mode = self.risk_manager.is_observation_mode()
+            
             # If signal carries specific risk override (volatility shock), apply directly
-            position_size = self.position_sizer.size(stop_dist, self.monitor.equity, tough_mode=tough_mode)
+            position_size = self.position_sizer.size(
+                stop_dist, 
+                self.monitor.equity, 
+                tough_mode=tough_mode,
+                ai_confidence=ai_confidence,
+                observation_mode=observation_mode
+            )
 
             # Performance tracking (ATR-normalized returns), skip during warmup
             if not is_warmup:
                 prev_equity_len = len(self.monitor.equity)
                 self.monitor.record_trade(trade_return)
                 self.regime_guard.update(trade_return)
-                self.risk_manager.update(trade_return, self.monitor.equity, current_time=row["open_time"])
+                self.risk_manager.update(trade_return, self.monitor.equity, current_time=candle_open_time)
 
                 # v5.0: Equity recovery restore
                 if len(self.monitor.equity) >= 2:
@@ -377,11 +471,11 @@ def _do_refresh(asset_id: str = "BTCUSDT"):
             removed.append(f)
 
     if removed:
-        print("🗑️  Refresh — removed:")
+        print("[Refresh] Removed:")
         for f in removed:
             print(f"   {f}")
     else:
-        print("🗑️  Refresh — nothing to remove (already clean).")
+        print("[Refresh] Nothing to remove (already clean).")
     print()
 
 
@@ -399,14 +493,20 @@ if __name__ == "__main__":
         help="Asset ID to run (default: BTCUSDT)"
     )
     parser.add_argument(
-        "--data",
-        default="btc_5m_extended.csv",
-        help="Path to input CSV (default: btc_5m_extended.csv)"
+        "--data_prefix",
+        default="btcusdt",
+        help="Prefix of the CSVs downloaded by MTF script (default: btcusdt)"
+    )
+    parser.add_argument(
+        "--warmup",
+        type=int,
+        default=30000,
+        help="Number of bars to use for context building without trading (default: 30000)"
     )
     args = parser.parse_args()
 
     if args.refresh:
         _do_refresh(asset_id=args.asset)
 
-    engine = PAILabEngine(args.data, asset_id=args.asset)
+    engine = PAILabEngine(args.data_prefix, asset_id=args.asset, warm_up_bars=args.warmup)
     engine.run()

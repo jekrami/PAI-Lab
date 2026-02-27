@@ -44,7 +44,9 @@ class RegimeGuard:
 
     def _evaluate_regime(self):
 
-        if len(self.recent_returns) < self.window:
+        # Require a 50-trade burn-in before allowing statistically significant shutdowns
+        if len(self.recent_returns) < self.window or len(self.all_returns) < 50:
+            self.paused = False
             return
 
         recent = np.array(self.recent_returns)

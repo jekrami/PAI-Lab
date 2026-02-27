@@ -1,35 +1,52 @@
 <!--
 Description: PAI-Lab README — Al Brooks Price Action Trading Engine
-Date: 2026-02-25
+Date: 2026-02-27
 Writer: J.Ekrami
 Co-writer: Antigravity
-Version: 5.0.0
+Version: 8.0.0
 -->
 
-# 📘 PAI-Lab
+# 📘 PAI-Lab (Operational Intelligence Phase)
 
-**Price Action Intelligence Laboratory**
-*An adaptive trading engine built on Al Brooks' price-action principles*
+**Price Action Intelligence Laboratory (Version 8)**
+*An adaptive, Multi-Timeframe (MTF) trading engine built on Al Brooks' price-action principles*
 
 ---
 
 ## Overview
 
-PAI-Lab is a modular, multi-asset trading engine that translates Al Brooks' visual price-action methodology into executable, quantifiable code. It detects structural setups (H1, H2, L1, L2, breakouts, wedge reversals), validates them through follow-through bar confirmation, and manages trades with context-aware targets, trailing stops, and partial exits — all gated by an AI probability layer and capital protection system.
+PAI-Lab is a modular, multi-asset trading engine that translates Al Brooks' visual price-action methodology into executable, quantifiable code. The system operates on a **Multi-Timeframe architecture**, combining the 1H and 15M charts for macroscopic context, the 5M chart for primary structural signal detection (H1/H2, L1/L2, Breakouts, Wedge Reversals), and the 1M chart for precise Micro-Entry execution.
 
-**Current performance (BTC 5m backtest — v5.0 Trained AI):**
-
-| Metric | Value |
-|---|---|
-| Win Rate | 50.0% |
-| Expectancy | +0.30 ATR per trade |
+Version 8 completes the transition to **Operational Intelligence**. Rather than blind execution, PAI-Lab now routes all signals through a **Simulation Sandbox**, running a 1,000-iteration Monte Carlo LSB (Local Synthetic Backtest) against the current market regime. Trades are only committed to capital if they boast an Expected Value (EV) > 0.1R and a Probability of Profit (Pp) ≥ 35%.
 | R:R | 1R (range scalp) → 2R (trend swing), scaled continuously by regime probability |
 | Risk per trade | 1% normal / 0.3% in tough / shock conditions |
 | Max Drawdown | −1.0 ATR (v5.0 hard-block filters prevent wide-stop losses) |
 
+## Quick Start & Usage
+
+### 1. Engine Core Pipeline (Historical Backtest & AI Training)
+To analyze the engine's edge and train the AI on historical metrics, run the synchronized Multi-Timeframe engine:
+```bash
+python main.py --refresh --warmup 30000
+```
+- `--refresh`: Wipes the previous `state/` and generated `logs/` to force a clean slate.
+- `--warmup N`: Defines the number of 1-minute bars strictly used to build market context before gating trades.
+- Reads `btcusdt_1m.csv`, `btcusdt_5m.csv`, `btcusdt_15m.csv`, and `btcusdt_1h.csv`.
+
+### 2. Live Paper Trading (Forward Testing)
+To run the fully independent live paper trader connected to the Binance Live Feed via WebSockets/REST:
+```bash
+python live_runner.py
+```
+- Initiates an initial historical payload to warm up the 1M, 5M, 15M, and 1H contexts.
+- Listens for 1-minute interval closures.
+- Places simulated Limit Orders (Micro-Entries) scanning for optimal H2/L2 structures.
+- Generates `logs/live_metrics.csv` and `logs/live_trades.csv` exactly as the real engine would.
+
 ---
 
-## What's New in v5.0
+## Breakthroughs in V6 - V8
+
 
 ### 1. Pressure Scoring Engine *(replaces 3 binary bar filters)*
 

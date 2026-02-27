@@ -1,3 +1,4 @@
+# 2026-02-27 | v1.1.0 | Performance tracking and metrics | Writer: J.Ekrami | Co-writer: Antigravity
 import numpy as np
 
 
@@ -32,6 +33,7 @@ class PerformanceMonitor:
             return {
                 "total_trades": 0,
                 "expectancy": 0,
+                "profit_factor": 0,
                 "volatility": 0,
                 "sharpe_proxy": 0,
                 "max_drawdown": 0,
@@ -46,6 +48,11 @@ class PerformanceMonitor:
         expectancy = returns.mean()
         volatility = returns.std()
         sharpe_proxy = expectancy / volatility if volatility > 0 else 0
+        
+        # Profit Factor
+        gross_profit = returns[returns > 0].sum() if len(returns[returns > 0]) > 0 else 0
+        gross_loss = abs(returns[returns < 0].sum()) if len(returns[returns < 0]) > 0 else 0
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else (999.0 if gross_profit > 0 else 0.0)
 
         # Drawdown calculation
         running_max = np.maximum.accumulate(equity)
@@ -78,6 +85,7 @@ class PerformanceMonitor:
         return {
             "total_trades": len(returns),
             "expectancy": round(expectancy, 4),
+            "profit_factor": round(profit_factor, 2),
             "volatility": round(volatility, 4),
             "sharpe_proxy": round(sharpe_proxy, 4),
             "max_drawdown": round(max_drawdown, 2),

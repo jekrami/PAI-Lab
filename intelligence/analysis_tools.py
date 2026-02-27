@@ -38,7 +38,7 @@ def calibration_test(context_log_path: str = "logs/ai_context.csv",
     n        = min(len(executed), len(trades))
 
     if n < 20:
-        print(f"  ⚠ Not enough data ({n} trades). Run with more candles.\n")
+        print(f"  [Warning] Not enough data ({n} trades). Run with more candles.\n")
         return
 
     merged = executed.iloc[:n].copy()
@@ -52,8 +52,10 @@ def calibration_test(context_log_path: str = "logs/ai_context.csv",
     )
     print(table.to_string())
     wins = table["win_freq"].dropna().values
+    print(table.to_string())
+    wins = table["win_freq"].dropna().values
     is_monotonic = all(wins[i] <= wins[i + 1] for i in range(len(wins) - 1))
-    print(f"\n  Monotonic: {'✅ YES — model learning edge' if is_monotonic else '❌ NO — model not calibrated'}")
+    print(f"\n  Monotonic: {'YES — model learning edge' if is_monotonic else 'NO — model not calibrated'}")
     print()
 
 
@@ -69,7 +71,7 @@ def feature_importance_report(controller):
     model = controller.ai_model
 
     if not model.is_trained:
-        print("  ⚠ Model not trained yet.\n")
+        print("  [Warning] Model not trained yet.\n")
         return
 
     bias_model = model.model_bias
@@ -95,7 +97,7 @@ def setup_regime_report(controller):
     print("SETUP-LEVEL ROLLING EXPECTANCY")
     print("=" * 60)
     for k, v in controller.setup_tracker.stats().items():
-        status = "🚫 DISABLED" if v["disabled"] else "✅ Active"
+        status = "[DISABLED]" if v["disabled"] else "[Active]"
         print(f"  {k:<25}  trades={v['count']:>3}  avg_R={v['avg_R']:>7.4f}  {status}")
 
     print()
@@ -103,7 +105,7 @@ def setup_regime_report(controller):
     print("PER-REGIME ROLLING EXPECTANCY")
     print("=" * 60)
     for k, v in controller.regime_tracker.stats().items():
-        status = "🚫 BLOCKED" if v["blocked"] else "✅ Active"
+        status = "[BLOCKED]" if v["blocked"] else "[Active]"
         print(f"  {k:<15}  trades={v['count']:>3}  avg_R={v['avg_R']:>7.4f}  {status}")
     print()
 

@@ -13,6 +13,7 @@ Responsibilities:
 
 import numpy as np
 import pandas as pd
+import os
 from collections import deque
 from intelligence.ai_context_model import AIContextModel
 
@@ -26,8 +27,8 @@ CONT_PROB_TREND_GATE     = 0.60   # continuation_prob gate for trend-following s
 TREND_SETUPS             = {"h2", "h1", "breakout_pullback", "l2", "l1", "inside_bar"}
 SETUP_WINDOW             = 50     # rolling window for setup expectancy
 REGIME_WINDOW            = 75     # rolling window for regime expectancy (wider = more stable)
-SETUP_MIN_TRADES         = 20     # minimum trades before SetupTracker can disable a setup
-REGIME_MIN_TRADES        = 20     # minimum trades before RegimeTracker can block a regime
+SETUP_MIN_TRADES         = 100    # minimum trades before SetupTracker can disable a setup
+REGIME_MIN_TRADES        = 100    # minimum trades before RegimeTracker can block a regime
 
 MAX_BARS                 = 50     # maximum forward scan for event-based label resolution
 
@@ -256,6 +257,17 @@ class RollingController:
 
         self.ai_model = AIContextModel()
 
+        # Try to load existing model
+        asset_id = os.environ.get("PAI_ASSET_ID", "BTCUSDT") # Default back to BTC if not found
+        model_path = f"state/ai_model_{asset_id}.pkl"
+        scaler_path = f"state/ai_scaler_{asset_id}.pkl"
+        if os.path.exists(model_path) and os.path.exists(scaler_path):
+            try:
+                self.ai_model.load(model_path, scaler_path)
+                print(f"[RollingController] Loaded pre-trained AI model from {model_path}")
+            except Exception as e:
+                print(f"[RollingController] Failed to load pre-trained AI model: {e}")
+
         # Rolling buffers — one entry per setup (not per 5m bar)
         self.feature_buffer: list[dict] = []   # features at each setup
         self.candle_buffer:  list[dict] = []   # raw candle for forward-label computation
@@ -273,7 +285,7 @@ class RollingController:
         # Pattern Failure Memory (v5.0 preserved)
         self.pattern_results    = {}
         self.pattern_confidence = {}
-        self._warmup_mode       = True
+        self._warmup_mode       = not self.ai_model.is_trained
 
     # -------------------------------------------------------------------
     # Feed the continuous market stream
@@ -348,7 +360,7 @@ class RollingController:
         
         if total_signals > 0 and not df_clean.empty and discard_count > 0:
             print("\n" + "="*60)
-            print("🚀 PRE-TRAIN EVENT DIAGNOSTICS")
+            print("PRE-TRAIN EVENT DIAGNOSTICS")
             print("="*60)
             print(f"Total Signals: {total_signals} | Discarded (Unresolved in {MAX_BARS} bars): {discard_count} ({discard_count/total_signals:.1%})")
             
@@ -421,6 +433,16 @@ class RollingController:
         # Gate 4: Per-setup expectancy
         if self.setup_tracker.is_disabled(setup_type):
             return {"block": True, "reason": f"SetupDisabled:{setup_type}"}
+
+        # Gate 5: Strategy Selector (MOO) enforces ALLOWED_SETUPS_MAP
+        ctx = self.ai_model.last_context
+        if ctx:
+            bias = ctx.get("bias", "NEUTRAL")
+            env = ctx.get("environment", "TRANSITION")
+            allowed = ALLOWED_SETUPS_MAP.get((bias, env))
+            # If allowed is a list, and setup_type not in it, block it.
+            if allowed is not None and setup_type not in allowed:
+                return {"block": True, "reason": f"MOO_Filtered:{setup_type}_in_{bias}_{env}"}
 
         return {"block": False, "reason": None}
 

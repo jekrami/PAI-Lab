@@ -186,6 +186,33 @@ class RiskManager:
 
         return False
 
+    def is_observation_mode(self):
+        """
+        V8 Circuit Breaker: If daily drawdown > 2%, enter observation mode.
+        While in observation mode, the system shadow-trades (size=0) to
+        track simulated expectancy, but risks no live capital.
+        """
+        if not self.total_equity or not self.daily_returns:
+            return False
+            
+        # Get equity values corresponding to today's session
+        # +1 to include the starting equity of the day
+        trades_today = len(self.daily_returns)
+        if trades_today == 0:
+            return False
+            
+        today_equity_curve = self.total_equity[-(trades_today + 1):]
+        if not today_equity_curve:
+            return False
+            
+        peak_today = max(today_equity_curve)
+        current = self.total_equity[-1]
+        
+        if peak_today > 0 and (peak_today - current) / peak_today > 0.02:
+            return True
+            
+        return False
+
     def restore_risk(self):
         """
         Called when a new equity high is confirmed.
